@@ -43,13 +43,28 @@ class PySTEPSModel:
                 - `model.km_per_pixel` (float): Spatial resolution of the input data
                   in kilometers per pixel.
         """
-        self.transform_to_rainrate = config.model.get('transform_to_rainrate', None)
-        self.transform_from_rainrate = config.model.get('transform_from_rainrate', None)
-        self.nowcast_method = nowcasts.get_method("steps")
-        self.future_timesteps = config.model.get('future_timesteps', 20)
-        self.ensemble_size = config.model.get('ensemble_size', 32)
-        self.km_per_pixel = config.model.get('km_per_pixel', 1.0)
+        self.method_name = config.model.get("method", "steps").lower()
+        self.nowcast_method = nowcasts.get_method(self.method_name)
+        # common
+        self.future_timesteps = config.model.get("future_timesteps", 20)
+        self.km_per_pixel = config.model.get("km_per_pixel", 1.0)
         self.interval = timedelta(minutes=5)
+
+        # STEPS-specific
+        self.ensemble_size = config.model.get("ensemble_size", 32)
+        self.n_cascade_levels = config.model.get("n_cascade_levels", 6)
+        self.noise_method = config.model.get("noise_method", "nonparametric")
+        self.vel_pert_method = config.model.get("vel_pert_method", "bps")
+        self.mask_method = config.model.get("mask_method", "incremental")
+
+        # S‑PROG-specific
+        self.ar_order = config.model.get("ar_order", 2)
+        self.decomp_method = config.model.get("decomp_method", "fft")
+        self.bandpass_filter = config.model.get("bandpass_filter", "gaussian")
+        self.probmeth = config.model.get("probmatching_method", None)
+
+        self.transform_to_rainrate = config.model.get("transform_to_rainrate", None)
+        self.transform_from_rainrate = config.model.get("transform_from_rainrate", None)
 
     def zero_prediction(self, R: np.ndarray, zerovalue: float) -> np.ndarray:
         """
@@ -111,29 +126,41 @@ class PySTEPSModel:
         print("R stats:", R.shape, np.min(R), np.max(R), np.isnan(R).sum())
 
         R[~np.isfinite(R)] = zerovalue
-
+        
         if (R == zerovalue).all():
             R_f = self.zero_prediction(R, zerovalue)
         else:
-            V = dense_lucaskanade(R, verbose=False);
-
-            print("Vector field stats:", V.shape, np.min(V), np.max(V), np.isnan(V).sum())
+            V = dense_lucaskanade(R, verbose=False)
             try:
-                R_f = self.nowcast_method(
-                    R,
-                    V,
-                    self.future_timesteps,
-                    n_ens_members=self.ensemble_size,
-                    n_cascade_levels=6,
-                    precip_thr=threshold,
-                    kmperpixel=self.km_per_pixel,
-                    timestep=self.interval.total_seconds()/60,
-                    noise_method="nonparametric",
-                    vel_pert_method="bps",
-                    mask_method="incremental",
-                    num_workers=self.future_timesteps,
-                );
-                R_f = R_f.transpose(1,2,3,0)
+                if self.method_name == "sprog":
+                    arr = self.nowcast_method(
+                        R, V,
+                        self.future_timesteps,
+                        precip_thr=threshold,
+                        n_cascade_levels=self.n_cascade_levels,
+                        ar_order=self.ar_order,
+                        decomp_method=self.decomp_method,
+                        bandpass_filter_method=self.bandpass_filter,
+                        probmatching_method=self.probmeth,
+                        measure_time=False
+                    )
+                    R_f = arr[..., np.newaxis]
+                else:  # steps
+                    arr = self.nowcast_method(
+                        R, V,
+                        self.future_timesteps,
+                        n_ens_members=self.ensemble_size,
+                        n_cascade_levels=self.n_cascade_levels,
+                        precip_thr=threshold,
+                        kmperpixel=self.km_per_pixel,
+                        timestep=self.interval.total_seconds()/60,
+                        noise_method=self.noise_method,
+                        vel_pert_method=self.vel_pert_method,
+                        mask_method=self.mask_method,
+                        probmatching_method=self.probmeth,
+                        num_workers=self.future_timesteps
+                    )
+                    R_f = arr.transpose(1, 2, 3, 0)
             except (ValueError, RuntimeError, np.linalg.LinAlgError) as e:
                 zero_error = str(e).endswith("contains non-finite values") or \
                     str(e).startswith("zero-size array to reduction operation") or \

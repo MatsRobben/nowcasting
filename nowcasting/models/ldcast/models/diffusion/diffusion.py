@@ -12,62 +12,112 @@ import torch
 import torch.nn as nn
 import numpy as np
 import torchvision.utils
-import pytorch_lightning as pl
+import matplotlib.pyplot as plt
+import matplotlib
+import lightning as L
 from contextlib import contextmanager
 from functools import partial
- 
+from omegaconf import DictConfig
+
+
 from .utils import make_beta_schedule, extract_into_tensor, noise_like, timestep_embedding
 from .ema import LitEma
 from .plms import PLMSSampler
 from ..blocks.afno import PatchEmbed3d, PatchExpand3d, AFNOBlock3d
 
+from ..autoenc.autoenc import AutoencoderKL
+from ..genforecast import analysis, unet
 
-class LatentDiffusion(pl.LightningModule):
+class LatentDiffusion(L.LightningModule):
     def __init__(self,
-        model,
-        autoencoder,
-        context_encoder=None,
-        timesteps=1000,
-        beta_schedule="linear",
-        loss_type="l2",
-        use_ema=True,
-        lr=1e-4,
-        lr_warmup=0,
-        linear_start=1e-4,
-        linear_end=2e-2,
-        cosine_s=8e-3,
-        parameterization="eps",  # all assuming fixed variance schedules
-        val_num_diffusion_iters=50,
+        config: DictConfig
     ):
         super().__init__()
-        self.model = model
-        self.autoencoder = autoencoder.requires_grad_(False)
-        self.conditional = (context_encoder is not None)
-        self.context_encoder = context_encoder
-        self.lr = lr
-        self.lr_warmup = lr_warmup
-        self.val_num_diffusion_iters = val_num_diffusion_iters
+        self.config = config
 
-        assert parameterization in ["eps", "x0"], 'currently only supporting "eps" and "x0"'
-        self.parameterization = parameterization
-        
-        self.use_ema = use_ema
+        # --- 1. Instantiate and Load Components from Config ---
+        # Instantiate components in order of dependency:
+        # Autoencoder -> Context Encoder -> UNet Model
+
+        # Load the main autoencoder for the latent space
+        autoencoders = [
+            self._load_autoencoder(cfg, ckpt)
+            for cfg, ckpt in zip(config.model.autoencoders, config.model.autoencoder_ckpts)
+        ]
+
+        # Assume the first autoencoder is the main
+        self.autoencoder = autoencoders[0].requires_grad_(False)
+
+        # Load the context encoder if specified (for conditional diffusion)
+        self.context_encoder = None
+        if "context_encoder" in config.model:
+            self.context_encoder = self._load_context_encoder(autoencoders, config.model.context_encoder)
+            self.conditional = True
+        else:
+            self.conditional = False
+
+        # Instantiate the core diffusion model (e.g., UNet)
+        # Its parameters can depend on the autoencoder and context encoder
+        self.model = unet.UNetModel(
+            in_channels=self.autoencoder.hidden_width,
+            out_channels=self.autoencoder.hidden_width,
+            context_ch=self.context_encoder.cascade_dims if self.conditional else None,
+            **config.model.model  # Pass the rest of the UNet-specific params
+        )
+
+        # --- 2. Set Up Diffusion & Training Parameters ---
+        self.lr = config.optimizer.lr
+        self.lr_warmup = config.optimizer.get("lr_warmup", 0)
+        self.val_num_diffusion_iters = config.model.get("num_diffusion_iters", 50)
+
+        self.parameterization = config.model.get("parameterization", "eps")
+        assert self.parameterization in ["eps", "x0"], 'currently only supporting "eps" and "x0"'
+
+        self.loss_type = config.loss.get("loss_name", "l2")
+
+        # --- 3. Initialize EMA and Noise Schedule ---
+        self.use_ema = config.model.get("use_ema", True)
         if self.use_ema:
             self.model_ema = LitEma(self.model)
 
         self.register_schedule(
-            beta_schedule=beta_schedule, timesteps=timesteps,
-            linear_start=linear_start, linear_end=linear_end, 
-            cosine_s=cosine_s
+            beta_schedule=config.model.get("beta_schedule", "linear"),
+            timesteps=config.model.get("timesteps", 1000),
+            linear_start=config.model.get("linear_start", 1e-4),
+            linear_end=config.model.get("linear_end", 2e-2),
+            cosine_s=config.model.get("cosine_s", 8e-3)
         )
-
-        self.loss_type = loss_type
 
         self.sample_images = None
         self.sampler = PLMSSampler(self)
 
+    def _load_autoencoder(self, config, checkpoint_path):
+        """Instantiate autoencoder from config and load weights"""
+        if config is None or checkpoint_path is None:
+            return None
+        
+        # Create autoencoder
+        autoencoder = AutoencoderKL(config)
+
+        map_location = self.device if hasattr(self, 'device') else 'cpu'
+        checkpoint = torch.load(checkpoint_path, weights_only=False, map_location=map_location)
+        autoencoder.load_state_dict(checkpoint['state_dict'], strict=False)
+        
+        print("Instantiated autoencoder and loaded weights.")
+        return autoencoder
+
+    def _load_context_encoder(self, autoencoders, context_config: DictConfig) -> analysis.AFNONowcastNetCascade:
+        """Instantiates a context encoder (AFNO cascade) from config."""
+        # Instantiate the main context encoder model
+        context_encoder = analysis.AFNONowcastNetCascade(
+            autoencoders,
+            **context_config # Pass other params like input_patches, embed_dim, etc.
+        )
+        print("Instantiated context encoder.")
+        return context_encoder
+
     def register_schedule(self, beta_schedule="linear", timesteps=1000,
-                          linear_start=1e-4, linear_end=2e-2, cosine_s=8e-3):
+                        linear_start=1e-4, linear_end=2e-2, cosine_s=8e-3):
 
         betas = make_beta_schedule(
             beta_schedule, timesteps,
@@ -165,10 +215,10 @@ class LatentDiffusion(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         loss = self.shared_step(batch)
-        self.log("train/loss", loss, prog_bar=True)
+        self.log("train/loss", loss, prog_bar=True, sync_dist=True)
         
         lr = self.trainer.optimizers[0].param_groups[0]['lr']
-        self.log("train/lr", lr, prog_bar=True)
+        self.log("train/lr", lr, prog_bar=True, sync_dist=True)
         return loss
 
     @torch.no_grad()
@@ -177,7 +227,7 @@ class LatentDiffusion(pl.LightningModule):
         with self.ema_scope():
             loss_ema = self.shared_step(batch)
 
-        if batch_idx == 0 and self.global_rank == 0:
+        if batch_idx == 73 and self.global_rank == 0:
             (x, y) = batch
             x_s = x[0][0][0:1]
             x_t = x[0][1][0:1]
@@ -188,8 +238,8 @@ class LatentDiffusion(pl.LightningModule):
             gen_shape = (self.autoencoder.hidden_width, time//4, width//4, height//4)
 
             with self.ema_scope():
-                 # The sampler needs the model (self), steps, batch_size, shape, condition
-                 # Condition should be the encoded context for the *first* batch item
+                # The sampler needs the model (self), steps, batch_size, shape, condition
+                # Condition should be the encoded context for the *first* batch item
                 latent_sample, _ = self.sampler.sample(
                     S=self.val_num_diffusion_iters,
                     batch_size=1, # Generate only one sample
@@ -208,75 +258,111 @@ class LatentDiffusion(pl.LightningModule):
             print(f"Validation Sampling: Generated sample. Input: {input_img.shape}, Target: {target_img.shape}, Prediction: {pred_img.shape}")
 
 
-        log_params = {"on_step": False, "on_epoch": True, "prog_bar": True}
+        log_params = {"on_step": False, "on_epoch": True, "prog_bar": True, "sync_dist": True}
         self.log("val/loss", loss, **log_params)
-        self.log("val/loss_ema", loss, **log_params)
+        self.log("val/loss_ema", loss_ema, **log_params)
+
+    def get_colormap(self, name):
+        if name == 'mmh':
+            reds = "#7D7D7D", "#640064", "#AF00AF", "#DC00DC", "#3232C8", "#0064FF", \
+                "#009696", "#00C832", "#64FF00", "#96FF00", "#C8FF00", "#FFFF00", \
+                "#FFC800", "#FFA000", "#FF7D00", "#E11900"
+            clevs = [0.08, 0.16, 0.25, 0.40, 0.63, 1, 1.6, 2.5, 4, 6.3, 10, 16, 25, 40, 63, 100, 160]
+            cmap = matplotlib.colors.ListedColormap(reds)
+            norm = matplotlib.colors.BoundaryNorm(clevs, len(reds))
+            return cmap, norm
+        cmap = matplotlib.colormaps.get(name)
+        if cmap is None:
+            raise ValueError(f"Unknown colormap: {name}")
+        return cmap, None
+
+    def _apply_colormap(self, img, cmap="mmh", mean=0.03019706713265408, std=0.5392297631902654):
+        """
+        Apply a matplotlib colormap (including 'mmh') to a Z-scored log10 rain rate image.
+
+        img: (H, W) torch.Tensor in z-score space.
+        Returns: (3, H, W) torch.Tensor in uint8 RGB.
+        """
+        img_np = img.numpy()
+
+        # Undo z-score normalization
+        img_np = img_np * std + mean
+
+        # Convert back from log10 to mm/h
+        img_np = 10 ** img_np
+
+        # Clip to reasonable physical range
+        img_np = np.clip(img_np, 0, 160)  # max matches your clevs
+
+        # Get colormap and norm
+        cmap_obj, norm_obj = self.get_colormap(cmap)
+
+        if norm_obj is not None:
+            img_colored = cmap_obj(norm_obj(img_np))[:, :, :3]
+        else:
+            # Fallback to normal continuous colormap
+            img_min, img_max = img_np.min(), img_np.max()
+            img_norm = (img_np - img_min) / (img_max - img_min) if img_max > img_min else np.zeros_like(img_np)
+            img_colored = cmap_obj(img_norm)[:, :, :3]
+
+        img_colored = (img_colored * 255).astype(np.uint8)
+        img_colored = torch.from_numpy(img_colored).permute(2, 0, 1)  # (C, H, W)
+
+        return img_colored
+
 
     def on_validation_epoch_end(self):
 
-         if self.sample_images is not None and self.global_rank == 0:
+        if self.sample_images is not None and self.global_rank == 0:
             input_img, target_img, pred_img = self.sample_images
 
-            print(f"on_validation_epoch_end: Found sample data on rank {self.global_rank}. Creating grid...")
-            print(f"Input shape: {input_img.shape}, Target shape: {target_img.shape}, Prediction shape: {pred_img.shape}")
+            # Get dimensions
+            T_in, C, H, W = input_img.shape
+            if C > 1:
+                input_img = input_img[:, :1, :, :]
 
-            # Get dimensions AFTER ensuring channel dim exists
-            T_in, C_in, H_in, W_in = input_img.shape
-            T_out, C_out, H_out, W_out = target_img.shape
+            T_out = target_img.shape[0]
 
-            # Create visualization grid
-            last_input = input_img[-1].unsqueeze(0)  # Last input frame [1, C, H, W]
+            last_input = input_img[-1].squeeze()  # Ensure shape (H, W)
 
-            # Interleave target and prediction frames
             interleaved = []
             for t in range(T_out):
-                 # Add target and prediction side-by-side for each timestep
-                 # Ensure they have the same C, H, W
-                 # Clamp values to [0, 1] for visualization
-                target_frame = target_img[t].clamp(0, 1)
-                pred_frame = pred_img[t].clamp(0, 1)
-                interleaved.append(target_frame)
-                interleaved.append(pred_frame)
+                interleaved.append(target_img[t].squeeze())  # (H, W)
+                interleaved.append(pred_img[t].squeeze())    # (H, W)
 
+            all_frames = [last_input] + interleaved
+            all_frames_colored = [self._apply_colormap(frame) for frame in all_frames]
+            all_frames_colored = torch.stack(all_frames_colored)  # Shape (N, 3, H, W)
 
-            # Combine: Last Input | Target_0 | Pred_0 | Target_1 | Pred_1 | ...
-            # Stack interleaved first, then concatenate with last input
-            if interleaved: # Only proceed if there are output frames
-                interleaved_stack = torch.stack(interleaved) # [2*T_out, C, H, W]
-                all_frames = torch.cat([last_input, interleaved_stack], dim=0) # [1 + 2*T_out, C, H, W]
+            grid = torchvision.utils.make_grid(all_frames_colored, nrow=len(all_frames_colored))
 
-                # Create grid (adjust nrow based on how you want to display)
-                grid = torchvision.utils.make_grid(all_frames, nrow=1 + 2*T_out, normalize=False) # Already clamped
+            self.logger.experiment.add_image(
+                "forecast_samples_colored",
+                grid,
+                global_step=self.current_epoch,
+            )
 
-                # Log to TensorBoard
-                self.logger.experiment.add_image(
-                    "forecast_samples",
-                    grid,
-                    global_step=self.current_epoch,
-                )
-                print(f"on_validation_epoch_end: Logged image grid to TensorBoard for epoch {self.current_epoch}.")
-            else:
-                 print(f"on_validation_epoch_end: No output frames (T_out={T_out}) found in sample data.")
+            self.sample_images = None
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr,
             betas=(0.5, 0.9), weight_decay=1e-3)
-        # reduce_lr = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        #     optimizer, patience=20, factor=0.1, verbose=True
-        # )
-
-        reduce_lr = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer,
-            T_max=self.trainer.estimated_stepping_batches,
-            eta_min=1e-9  # Minimum learning rate
+        reduce_lr = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, patience=3, factor=0.25
         )
+
+        
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": reduce_lr,
                 "monitor": "val/loss_ema",
                 "frequency": 1,
-            },
+            },# reduce_lr = torch.optim.lr_scheduler.CosineAnnealingLR(
+        #     optimizer,
+        #     T_max=self.trainer.estimated_stepping_batches,
+        #     eta_min=1e-9  # Minimum learning rate
+        # )
         }
 
     def on_train_batch_end(self, *args, **kwargs):

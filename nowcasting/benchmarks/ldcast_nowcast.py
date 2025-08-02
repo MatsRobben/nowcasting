@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from types import Union, Tuple
+from typing import Union, Tuple
 
 from nowcasting.models.ldcast.models.nowcast.nowcast import AFNONowcastModule
 from nowcasting.utils import data_prep

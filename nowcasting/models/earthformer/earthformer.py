@@ -1,6 +1,7 @@
 import lightning as L
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib
 
 import torch
 from torch import nn
@@ -148,10 +149,10 @@ class CuboidSEVIRPLModule(L.LightningModule):
 
         loss_mse = F.mse_loss(y_hat, y)
         
-        y_mmh = y.clone()
-        y_hat_mmh = y_hat.clone()
-        data_prep(y_mmh, convert_to_dbz=True, undo=True)
-        data_prep(y_hat_mmh, convert_to_dbz=True, undo=True)
+        y_mmh = self.to_mmh(y.clone())
+        y_hat_mmh = self.to_mmh(y_hat.clone())
+        # data_prep(y_mmh, convert_to_dbz=True, undo=True)
+        # data_prep(y_hat_mmh, convert_to_dbz=True, undo=True)
 
         step_mse = self.valid_r_mse(y_hat_mmh, y_mmh)
         step_mae = self.valid_r_mae(y_hat_mmh, y_mmh)
@@ -171,7 +172,7 @@ class CuboidSEVIRPLModule(L.LightningModule):
                 logger=True,
                 sync_dist=True)
 
-        if batch_idx == 18 and self.global_rank == 0:
+        if batch_idx == 636 and self.global_rank == 0:
             # Detach and move to CPU to avoid memory issues
             input_img = x[0].permute(0, 3, 1, 2).detach().cpu()
             target_img = y[0].permute(0, 3, 1, 2).detach().cpu()
@@ -180,29 +181,61 @@ class CuboidSEVIRPLModule(L.LightningModule):
 
         return loss_mse
 
-    def _apply_colormap(self, img, cmap="turbo"):
+    def to_mmh(self, img, mean=0.03019706713265408, std=0.5392297631902654):
+        # Undo z-score normalization and convert from log10 to mm/h
+        img = (img * std + mean)
+        img_mmh = 10 ** img
+
+        # Clip to physical range depending on type
+        if isinstance(img_mmh, torch.Tensor):
+            img_mmh = torch.clamp(img_mmh, min=0.0, max=160.0)
+        elif isinstance(img_mmh, np.ndarray):
+            img_mmh = np.clip(img_mmh, 0.0, 160.0)
+        else:
+            raise TypeError("Input must be a numpy array or a torch tensor")
+
+        return img_mmh
+
+    def get_colormap(self, name):
+        if name == 'mmh':
+            reds = "#7D7D7D", "#640064", "#AF00AF", "#DC00DC", "#3232C8", "#0064FF", \
+                "#009696", "#00C832", "#64FF00", "#96FF00", "#C8FF00", "#FFFF00", \
+                "#FFC800", "#FFA000", "#FF7D00", "#E11900"
+            clevs = [0.08, 0.16, 0.25, 0.40, 0.63, 1, 1.6, 2.5, 4, 6.3, 10, 16, 25, 40, 63, 100, 160]
+            cmap = matplotlib.colors.ListedColormap(reds)
+            norm = matplotlib.colors.BoundaryNorm(clevs, len(reds))
+            return cmap, norm
+        cmap = matplotlib.colormaps.get(name)
+        if cmap is None:
+            raise ValueError(f"Unknown colormap: {name}")
+        return cmap, None
+
+    def _apply_colormap(self, img, cmap="mmh", ):
         """
-        Apply a matplotlib colormap to a single-channel image and convert to RGB.
-        img: (H, W) tensor
-        Returns: (3, H, W) tensor
+        Apply a matplotlib colormap (including 'mmh') to a Z-scored log10 rain rate image.
+
+        img: (H, W) torch.Tensor in z-score space.
+        Returns: (3, H, W) torch.Tensor in uint8 RGB.
         """
         img_np = img.numpy()
-        # img_np = np.clip(img_np, 0, 50) / 50.0  # Normalize to [0, 1] for colormap
-        img_np = np.clip(img_np, 0, 1)
-        colormap = plt.get_cmap(cmap)
-        img_colored = colormap(img_np)[:, :, :3]  # Drop alpha channel
+
+        img_np = self.to_mmh(img_np)
+
+        # Get colormap and norm
+        cmap_obj, norm_obj = self.get_colormap(cmap)
+
+        if norm_obj is not None:
+            img_colored = cmap_obj(norm_obj(img_np))[:, :, :3]
+        else:
+            # Fallback to normal continuous colormap
+            img_min, img_max = img_np.min(), img_np.max()
+            img_norm = (img_np - img_min) / (img_max - img_min) if img_max > img_min else np.zeros_like(img_np)
+            img_colored = cmap_obj(img_norm)[:, :, :3]
+
         img_colored = (img_colored * 255).astype(np.uint8)
-        img_colored = torch.from_numpy(img_colored).permute(2, 0, 1)  # Convert to (C, H, W)
+        img_colored = torch.from_numpy(img_colored).permute(2, 0, 1)  # (C, H, W)
+
         return img_colored
-
-    def _undo_process_radar(self, img, mean=-1.628, std=0.309):
-        # Undo normalization
-        img *= std
-        img += mean
-
-        # Undo log10
-        img = 10 ** img
-        return img
 
     def on_validation_epoch_end(self):
 

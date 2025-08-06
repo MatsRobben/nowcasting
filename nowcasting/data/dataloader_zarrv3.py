@@ -185,9 +185,20 @@ class NowcastingDataset(Dataset):
             time_range = np.arange(time_start, time_end) // t_scale
             time_slice = (slice(time_range[0], time_range[-1] + 1),)
         
+        has_channel = group == "harmonie" and len(self.root[var].shape) == 5
+
+        # Build slice
+        if has_channel:
+            # Insert slice for first channel: (T, C, H, W) → select C=0
+            data_slice = time_slice + (slice(0, 1),) + scaled_img_slice
+        else:
+            data_slice = time_slice + scaled_img_slice
+
         # Load data
-        data_slice = time_slice + scaled_img_slice
         frame = self.root[var][data_slice].astype(np.float32)
+        
+        if has_channel:
+            frame = np.squeeze(frame, axis=1)
 
         # If the data is from 'aws', also load its corresponding location data.
         if group == 'aws':
@@ -779,7 +790,8 @@ if __name__ == "__main__":
         "in_vars": [
             # Example of nested 'in_vars': Each sub-list will be treated as a separate input group.
             # This is useful for multi-modal models that expect different data types as separate inputs.
-            ["radar/rtcor"], 
+            "radar/rtcor", 
+            "harmonie/TMP_GDS0_HTGL"
             # Uncomment and adjust paths to include other satellite or harmonie data:
             # ["sat_l1p5/WV_062", "sat_l1p5/IR_108"],
             # ["harmonie/PRES_GDS0_GPML", "harmonie/DPT_GDS0_HTGL", "harmonie/R_H_GDS0_HTGL",
@@ -796,8 +808,12 @@ if __name__ == "__main__":
             # Define transformations to apply to specific Zarr groups or variables.
             # These refer to functions defined in `nowcasting.data.utils.transforms`.
             "radar": {
-                "dbz_normalization": {"convert_to_dbz": True}, # Convert radar data to dBZ and normalize
+                "default_rainrate": {"mean": 0.030197, "std": 0.539229}, # Convert radar data to dBZ and normalize
             },
+            "harmonie": {"resize": {"scale": 2}},
+            "harmonie/TMP_GDS0_HTGL": {
+                "normalize": {"mean": 282.99435754062006, "std": 6.236862884872817}
+            }
         }
     }
 
@@ -818,7 +834,7 @@ if __name__ == "__main__":
     sample_info = {
         # threshold: Only include samples where the 'weight' (from 'sample_var') is above this value.
         # The value (25.0) is scaled by (255/50) in the code, so it's effectively 25.0 * (255/50) in raw units.
-        'threshold': 25.0, 
+        'threshold': 0.01, 
         'methods': {
             # Aggregation method for generating sample weights for each split.
             # 'max_pool' means the weight is the maximum value within the sample's window.
@@ -847,7 +863,7 @@ if __name__ == "__main__":
         split_info=split_info,
         context_len=4,       # 4 time steps for input
         forecast_len=18,     # 18 time steps for output
-        include_timestamps=True, # Include relative timestamps in context
+        include_timestamps=False, # Include relative timestamps in context
         img_size=(8,8),      # Spatial patch size: 8 blocks x 8 blocks
         stride=(1,1,1),      # Sample generation stride (t, h, w)
         batch_size=8,        # Batch size for DataLoaders

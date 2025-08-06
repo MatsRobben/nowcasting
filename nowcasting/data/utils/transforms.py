@@ -612,58 +612,35 @@ def resize_transform(target_shape: tuple[int, int] = None, scale: float = None, 
                          f"Choose from {list(method_map.keys())}.")
 
     def transform(data: np.ndarray) -> np.ndarray:
-        """
-        Applies resizing to the input image data.
-
-        Args:
-            data : np.ndarray
-                The input image data, expected in (C, H, W) format.
-
-        Returns:
-            np.ndarray
-                The resized image data in (C, H, W) format.
-        """
-        # Handle 2D arrays by adding a channel dimension for consistent processing.
+        # Ensure data is (C, H, W)
         if data.ndim == 2:
-            data = data[np.newaxis, :, :] # Convert (H, W) to (1, H, W)
-            single_channel_input = True
-        else:
-            single_channel_input = False
+            data = data[np.newaxis, ...]  # -> (1, H, W)
 
         C, H, W = data.shape
-        # OpenCV's `resize` function expects (H, W) or (H, W, C) format.
-        arr = np.transpose(data, (1, 2, 0))  # Convert (C, H, W) to (H, W, C)
-
-        # Store original dtype to convert back if necessary for float16 inputs.
-        original_dtype = arr.dtype
+        arr = np.transpose(data, (1, 2, 0))  # -> (H, W, C)
+        orig_dtype = arr.dtype
         if arr.dtype == np.float16:
-            # OpenCV resize might not handle float16 directly well; convert to float32.
             arr = arr.astype(np.float32)
 
-        # Determine the new height and width.
-        if target_shape:
+        # Determine new size
+        if target_shape is not None:
             newH, newW = target_shape
-        else: # scale is provided
+        else:
             newH = int(H * scale)
             newW = int(W * scale)
 
-        # Perform the resize operation.
+        # Perform resize; might drop the last dim if C == 1
         resized = cv2.resize(arr, (newW, newH), interpolation=interp)
 
-        # If the input originally had only one channel, ensure the output remains 2D.
-        if single_channel_input:
-            # After resizing, if C was 1, resized will be (newH, newW) or (newH, newW, 1).
-            # Ensure it's (1, newH, newW) for consistency before potentially squeezing later.
-            if resized.ndim == 2:
-                resized = resized[np.newaxis, :, :] # Convert (H, W) to (1, H, W)
-            else: # (H, W, 1) -> (1, H, W)
-                resized = np.transpose(resized, (2, 0, 1))
-        else:
-            # Convert back from (H, W, C) to (C, H, W) for multi-channel data.
-            resized = np.transpose(resized, (2, 0, 1))
+        # If OpenCV returned 2D, reintroduce channel axis
+        if resized.ndim == 2:
+            resized = resized[:, :, np.newaxis]  # -> (newH, newW, 1)
 
-        # Convert back to the original dtype if the input was float16.
-        if original_dtype == np.float16:
+        # Now resized is always (H', W', C)
+        resized = np.transpose(resized, (2, 0, 1))  # -> (C, H', W')
+
+        # Back to original dtype if needed
+        if orig_dtype == np.float16:
             resized = resized.astype(np.float16)
 
         return resized

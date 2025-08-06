@@ -198,3 +198,20 @@ For more details, see [`config/README.md`](config/README.md).
 Feel free to open issues or pull requests! If you want help extending the framework or adding new models, we welcome contributions and suggestions.
 
 ---
+
+## TODO
+
+Dataset:
+* Fix: add `"downscale_factor": 1` to `dataset.zarr/radar/zarr.json`
+* Fix: add new array to AWS that is the union over all the 'timemasks'
+* Update the metadata to be compilenet with the  [NetCDF convention](https://www.seadatanet.org/Standards/Data-Transport-Formats)
+* Make dataset compatable with xarray
+Models:
+* Add custom DGMR pytoch implimentation to the reposotory
+* Create seperation layer between the trainer and the models. This layer will need to deliver a Lighting model and will have to be implimented for each of the models. This will make sure that we do not have to modify the original model code too much.
+Evaluation:
+* Add more plotting fucntionaly
+* Add functionaly for saving some/all of the evaluation model output
+* Increase preformance by having also implementing a pytorch version, so that the tensors do not have to be converted so much.
+
+---

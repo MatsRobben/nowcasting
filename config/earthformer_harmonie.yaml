@@ -5,12 +5,15 @@ dataloader:
     sample_var: "radar/max_intensity_grid"
     in_vars:
       - "radar/rtcor"
-      - "harmonie/PRES_GDS0_GPML"
-      - "harmonie/DPT_GDS0_HTGL"
-      - "harmonie/R_H_GDS0_HTGL"
-      - "harmonie/A_PCP_GDS0_HTGL_acc"
-      - "harmonie/T_CDC_GDS0_HTGL"
-      - "harmonie/KNMI_var_201_entatm"
+      - "harmonie/PRES_GDS0_GPML" # Presure
+      - "harmonie/TMP_GDS0_HTGL" # Temperature
+      - "harmonie/DPT_GDS0_HTGL" # Dew point Temperature
+      - "harmonie/U_GRD_GDS0_HTGL" # U component of wind
+      - "harmonie/V_GRD_GDS0_HTGL" # V component of wind
+      - "harmonie/R_H_GDS0_HTGL" # Relative Humitaty
+      - "harmonie/A_PCP_GDS0_HTGL_acc" # Total Precipitaiton 
+      - "harmonie/T_CDC_GDS0_HTGL" # Total cloud cover
+      - "harmonie/KNMI_var_201_entatm" # Graupel (Entire atmosphere)
     out_vars: 
       - "radar/rtcor"
     transforms: 

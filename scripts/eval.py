@@ -7,7 +7,7 @@ from typing import List, Dict, Any, Optional
 from fire import Fire
 from omegaconf import OmegaConf
 
-from nowcasting.metrics.validation import Evaluator
+from nowcasting.validation.metrics import Evaluator
 
 def load_module(path: str):
     """

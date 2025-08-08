@@ -43,7 +43,7 @@ class CuboidSEVIRPLModule(L.LightningModule):
             **self.config.model,
         )
 
-        loss_name = self.config.loss.pop('loss_name')
+        loss_name = self.config.loss.pop('loss_name', 'mse')
         if loss_name == 'balanced':
             self.criterion = BalancedLoss(**self.config.loss)
         elif loss_name == 'multi-source':
@@ -151,8 +151,6 @@ class CuboidSEVIRPLModule(L.LightningModule):
         
         y_mmh = self.to_mmh(y.clone())
         y_hat_mmh = self.to_mmh(y_hat.clone())
-        # data_prep(y_mmh, convert_to_dbz=True, undo=True)
-        # data_prep(y_hat_mmh, convert_to_dbz=True, undo=True)
 
         step_mse = self.valid_r_mse(y_hat_mmh, y_mmh)
         step_mae = self.valid_r_mae(y_hat_mmh, y_mmh)
@@ -181,18 +179,47 @@ class CuboidSEVIRPLModule(L.LightningModule):
 
         return loss_mse
 
-    def to_mmh(self, img, mean=0.03019706713265408, std=0.5392297631902654):
-        # Undo z-score normalization and convert from log10 to mm/h
-        img = (img * std + mean)
-        img_mmh = 10 ** img
+    def to_mmh(self, img, norm_method='zscore', mean=0.03019706713265408, std=0.5392297631902654):
+        """
+        Convert normalized precipitation data to mm/h.
 
-        # Clip to physical range depending on type
+        Parameters:
+            img (np.ndarray or torch.Tensor): Normalized input data.
+            norm_method (str): 'zscore' or 'minmax'.
+            mean (float): Mean for z-score normalization.
+            std (float): Std for z-score normalization.
+
+        Returns:
+            img_mmh: Precipitation in mm/h (clipped to [0, 160]).
+        """
+        if norm_method == 'zscore':
+            img = img * std + mean
+            img_mmh = 10 ** img
+
+        elif norm_method == 'minmax':
+            # Undo minmax normalization to [0, 55] dBZ
+            img = img * 55
+
+            # Convert from dBZ to mm/h (in-place)
+            if isinstance(img, np.ndarray):
+                mask = img != 0
+                img[mask] = ((10**(img[mask] / 10) - 1) / 200) ** (5 / 8)
+            elif isinstance(img, torch.Tensor):
+                mask = img != 0
+                img[mask] = ((10**(img[mask] / 10) - 1) / 200) ** (5 / 8)
+            else:
+                raise TypeError("Input must be a numpy array or a torch tensor")
+
+            img_mmh = img
+
+        else:
+            raise ValueError("norm_method must be 'zscore' or 'minmax'")
+
+        # Clip final mm/h values to physical range
         if isinstance(img_mmh, torch.Tensor):
-            img_mmh = torch.clamp(img_mmh, min=0.0, max=160.0)
+            img_mmh = torch.clamp(img_mmh, 0.0, 160.0)
         elif isinstance(img_mmh, np.ndarray):
             img_mmh = np.clip(img_mmh, 0.0, 160.0)
-        else:
-            raise TypeError("Input must be a numpy array or a torch tensor")
 
         return img_mmh
 

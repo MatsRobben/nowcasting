@@ -96,6 +96,8 @@ class MultiSourceLoss(nn.Module):
                  channel_wegihts,
                  min_val=0, 
                  max_val=55, 
+                 mean_log_rain=0.03019706713265408,
+                 std_log_rain=0.5392297631902654,
                  max_weight_r=10.0, 
                  weight_intensity=1.0, 
                  extended=False):
@@ -118,6 +120,8 @@ class MultiSourceLoss(nn.Module):
         self.balanced_loss = BalancedLoss(
             min_val=min_val,
             max_val=max_val,
+            mean_log_rain=mean_log_rain,
+            std_log_rain=std_log_rain,
             max_weight_r=max_weight_r,
             weight_intensity=weight_intensity,
             extended=extended

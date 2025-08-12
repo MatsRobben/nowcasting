@@ -2,6 +2,7 @@ import collections
 
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib
 
 import torch
 from torch import nn
@@ -14,7 +15,6 @@ from ..blocks.afno import AFNOBlock3d
 from ..blocks.attention import positional_encoding, TemporalTransformer
 from ..autoenc.autoenc import AutoencoderKL
 from ....losses import BalancedLoss
-from .....utils import data_prep
 
 torch.set_float32_matmul_precision('medium')
 
@@ -221,6 +221,7 @@ class AFNONowcastNetBase(nn.Module):
             z = self.proj[i](z)
             z = z.permute(0,2,3,4,1)
             z = self.analysis[i](z)
+
             if self.use_temporal_transformer:
                 # add positional encoding
                 z = self.add_pos_enc(z, t_relative[i])
@@ -233,12 +234,15 @@ class AFNONowcastNetBase(nn.Module):
                 )
                 pe_out = pos_enc_output.expand(*expand_shape)
                 z = self.temporal_transformer[i](pe_out, z)
+
+            z = self.per_input_forecast[i](z)
             return z
 
         x = [process_input(i) for i in range(len(x))]
         
         # merge inputs
         x = self.fusion(x)
+
         # produce prediction
         x = self.forecast(x)
         return x.permute(0,4,1,2,3) # to channels-first order
@@ -409,6 +413,9 @@ class AFNONowcastModule(L.LightningModule):
         # Create autoencoder
         autoencoder = AutoencoderKL(config)
 
+        print(config)
+        print(checkpoint_path)
+
         map_location = self.device if hasattr(self, 'device') else 'cpu'
         checkpoint = torch.load(checkpoint_path, weights_only=False, map_location=map_location)
         autoencoder.load_state_dict(checkpoint['state_dict'], strict=False)
@@ -420,6 +427,7 @@ class AFNONowcastModule(L.LightningModule):
 
     def _loss(self, batch):
         (x,y) = batch
+
         y_pred = self.forward(x)
 
         loss = self.criterion(y_pred, y)
@@ -437,10 +445,12 @@ class AFNONowcastModule(L.LightningModule):
         x = batch[0][0][0]
         y_pred, loss = self._loss(batch)
 
-        y_mmh = y.clone()
-        y_hat_mmh = y_pred.clone()
-        data_prep(y_mmh, convert_to_dbz=True, undo=True)
-        data_prep(y_hat_mmh, convert_to_dbz=True, undo=True)
+        if y_pred.shape[1] != 1:
+            y_pred = y_pred[:, 0:1]
+            y = y[:, 0:1]
+
+        y_mmh = self.to_mmh(y.clone())
+        y_hat_mmh = self.to_mmh(y_pred.clone())
 
         step_mse = self.valid_r_mse(y_hat_mmh, y_mmh)
         step_mae = self.valid_r_mae(y_hat_mmh, y_mmh)
@@ -458,18 +468,89 @@ class AFNONowcastModule(L.LightningModule):
     def validation_step(self, batch, batch_idx):
         self.val_test_step(batch, batch_idx, split="val")
         
-    def _apply_colormap(self, img, cmap="turbo", min=0, max=1):
+    def to_mmh(self, img, norm_method='zscore', mean=0.03019706713265408, std=0.5392297631902654):
         """
-        Apply a matplotlib colormap to a single-channel image and convert to RGB.
-        img: (H, W) tensor
-        Returns: (3, H, W) tensor
+        Convert normalized precipitation data to mm/h.
+
+        Parameters:
+            img (np.ndarray or torch.Tensor): Normalized input data.
+            norm_method (str): 'zscore' or 'minmax'.
+            mean (float): Mean for z-score normalization.
+            std (float): Std for z-score normalization.
+
+        Returns:
+            img_mmh: Precipitation in mm/h (clipped to [0, 160]).
+        """
+        if norm_method == 'zscore':
+            img = img * std + mean
+            img_mmh = 10 ** img
+
+        elif norm_method == 'minmax':
+            # Undo minmax normalization to [0, 55] dBZ
+            img = img * 55
+
+            # Convert from dBZ to mm/h (in-place)
+            if isinstance(img, np.ndarray):
+                mask = img != 0
+                img[mask] = ((10**(img[mask] / 10) - 1) / 200) ** (5 / 8)
+            elif isinstance(img, torch.Tensor):
+                mask = img != 0
+                img[mask] = ((10**(img[mask] / 10) - 1) / 200) ** (5 / 8)
+            else:
+                raise TypeError("Input must be a numpy array or a torch tensor")
+
+            img_mmh = img
+
+        else:
+            raise ValueError("norm_method must be 'zscore' or 'minmax'")
+
+        # Clip final mm/h values to physical range
+        if isinstance(img_mmh, torch.Tensor):
+            img_mmh = torch.clamp(img_mmh, 0.0, 160.0)
+        elif isinstance(img_mmh, np.ndarray):
+            img_mmh = np.clip(img_mmh, 0.0, 160.0)
+
+        return img_mmh
+
+    def get_colormap(self, name):
+        if name == 'mmh':
+            reds = "#7D7D7D", "#640064", "#AF00AF", "#DC00DC", "#3232C8", "#0064FF", \
+                "#009696", "#00C832", "#64FF00", "#96FF00", "#C8FF00", "#FFFF00", \
+                "#FFC800", "#FFA000", "#FF7D00", "#E11900"
+            clevs = [0.08, 0.16, 0.25, 0.40, 0.63, 1, 1.6, 2.5, 4, 6.3, 10, 16, 25, 40, 63, 100, 160]
+            cmap = matplotlib.colors.ListedColormap(reds)
+            norm = matplotlib.colors.BoundaryNorm(clevs, len(reds))
+            return cmap, norm
+        cmap = matplotlib.colormaps.get(name)
+        if cmap is None:
+            raise ValueError(f"Unknown colormap: {name}")
+        return cmap, None
+
+    def _apply_colormap(self, img, cmap="mmh", ):
+        """
+        Apply a matplotlib colormap (including 'mmh') to a Z-scored log10 rain rate image.
+
+        img: (H, W) torch.Tensor in z-score space.
+        Returns: (3, H, W) torch.Tensor in uint8 RGB.
         """
         img_np = img.numpy()
-        img_np = (np.clip(img_np, min, max) - min) / (max-min)  # Normalize to [0, 1] for colormap
-        colormap = plt.get_cmap(cmap)
-        img_colored = colormap(img_np)[:, :, :3]  # Drop alpha channel
+
+        img_np = self.to_mmh(img_np)
+
+        # Get colormap and norm
+        cmap_obj, norm_obj = self.get_colormap(cmap)
+
+        if norm_obj is not None:
+            img_colored = cmap_obj(norm_obj(img_np))[:, :, :3]
+        else:
+            # Fallback to normal continuous colormap
+            img_min, img_max = img_np.min(), img_np.max()
+            img_norm = (img_np - img_min) / (img_max - img_min) if img_max > img_min else np.zeros_like(img_np)
+            img_colored = cmap_obj(img_norm)[:, :, :3]
+
         img_colored = (img_colored * 255).astype(np.uint8)
-        img_colored = torch.from_numpy(img_colored).permute(2, 0, 1)  # Convert to (C, H, W)
+        img_colored = torch.from_numpy(img_colored).permute(2, 0, 1)  # (C, H, W)
+
         return img_colored
     
     def on_validation_epoch_end(self):
@@ -489,18 +570,11 @@ class AFNONowcastModule(L.LightningModule):
 
         if self.sample_images is not None and self.global_rank == 0:
             input_img, target_img, pred_img = self.sample_images
-
+            
             # Get dimensions
             T_in, C, H, W = input_img.shape
             if C > 1:
                 input_img = input_img[:, :1, :, :]
-                target_img = target_img[:, :1, :, :]
-                pred_img = pred_img[:, :1, :, :]
-
-            combined = torch.cat([input_img.flatten(), target_img.flatten()])
-
-            min_val = combined.min()
-            max_val = combined.max()
 
             T_out = target_img.shape[0]
 
@@ -512,7 +586,7 @@ class AFNONowcastModule(L.LightningModule):
                 interleaved.append(pred_img[t].squeeze())    # (H, W)
 
             all_frames = [last_input] + interleaved
-            all_frames_colored = [self._apply_colormap(frame, min=min_val, max=max_val) for frame in all_frames]
+            all_frames_colored = [self._apply_colormap(frame) for frame in all_frames]
             all_frames_colored = torch.stack(all_frames_colored)  # Shape (N, 3, H, W)
 
             grid = torchvision.utils.make_grid(all_frames_colored, nrow=len(all_frames_colored))

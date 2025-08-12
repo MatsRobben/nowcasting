@@ -361,7 +361,7 @@ if __name__ == "__main__":
             "sat_l1p5/IR_134"
         ],
         "out_vars": [
-            "radar/rtcor"
+            "radar/rtcor",
             "sat_l1p5/IR_016",
             "sat_l1p5/IR_039",
             "sat_l1p5/WV_062",

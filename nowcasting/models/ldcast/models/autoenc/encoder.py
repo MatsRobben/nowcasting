@@ -6,7 +6,8 @@ from ..utils import activation, normalization
 
 
 class SimpleConvEncoder(nn.Sequential):
-    def __init__(self, in_dim=1, levels=2, min_ch=64):
+    def __init__(self, in_dim=1, levels=2, min_ch=64,
+                 downsample_kernel=(2,2,2)):
         sequence = []
         channels = np.hstack([
             in_dim, 
@@ -24,7 +25,7 @@ class SimpleConvEncoder(nn.Sequential):
             )
             sequence.append(res_block)
             downsample = nn.Conv3d(out_channels, out_channels,
-                kernel_size=(2,2,2), stride=(2,2,2))
+                kernel_size=downsample_kernel, stride=downsample_kernel)
             sequence.append(downsample)
             in_channels = out_channels
 
@@ -32,7 +33,8 @@ class SimpleConvEncoder(nn.Sequential):
 
 
 class SimpleConvDecoder(nn.Sequential):
-    def __init__(self, in_dim=1, levels=2, min_ch=64):
+    def __init__(self, in_dim=1, levels=2, min_ch=64,
+                 upsample_kernel=(2,2,2)):
         sequence = []
         channels = np.hstack([
             in_dim, 
@@ -43,7 +45,7 @@ class SimpleConvDecoder(nn.Sequential):
             in_channels = int(channels[i+1])
             out_channels = int(channels[i])
             upsample = nn.ConvTranspose3d(in_channels, in_channels, 
-                    kernel_size=(2,2,2), stride=(2,2,2))
+                    kernel_size=upsample_kernel, stride=upsample_kernel)
             sequence.append(upsample)
             res_kernel_size = (3,3,3) if (i == 0) else (1,3,3)
             res_block = ResBlock3D(

@@ -281,10 +281,6 @@ class CuboidSEVIRPLModule(L.LightningModule):
 
         if self.sample_images is not None and self.global_rank == 0:
             input_img, target_img, pred_img = self.sample_images
-            
-            # input_img = self._undo_process_radar(input_img)
-            # target_img = self._undo_process_radar(target_img)
-            # pred_img = self._undo_process_radar(pred_img)
 
             # Get dimensions
             T_in, C, H, W = input_img.shape

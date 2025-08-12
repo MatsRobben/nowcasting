@@ -15,24 +15,7 @@ from nowcasting.data.utils.transforms import set_transforms
 from nowcasting.data.utils.generate_samples import get_sample_dfs
 
 def scale_slice(slc: slice, factor: int) -> slice:
-    """
-    Scales the start, stop, and step attributes of a slice object by a given factor.
-
-    This utility function is used to adjust spatial or temporal slices when
-    accessing data from Zarr groups that might have different resolutions
-    (e.g., downscaled images or different temporal intervals).
-
-    Parameters:
-        slc : slice
-            The input slice object (e.g., `slice(0, 100, 2)`).
-        factor : int
-            The scaling factor. Start, stop, and step values will be divided by this factor.
-
-    Returns:
-        slice
-            A new slice object with its attributes scaled. If any attribute is `None`,
-            it remains `None`.
-    """
+    """Scale slice indices by dividing by factor."""
     return slice(
         slc.start // factor if slc.start is not None else None,
         slc.stop // factor if slc.stop is not None else None,
@@ -105,293 +88,273 @@ class NowcastingDataset(Dataset):
         self.forecast_len = forecast_len
         self.include_timestamps = include_timestamps
 
-        # Determine output format based on in_vars structure
-        in_vars = self.info.get('in_vars', [])
-        self.nested_output = len(in_vars) > 0 and isinstance(in_vars[0], (list, tuple))
+        # Analyze input/output structure
+        self._setup_variables()
+        
+        # Load static lat/lon data if needed
+        self._load_static_data()
 
-        # Identify the main variable (usually the radar data) to infer overall
-        # dataset properties like spatial shape for AWS cropping.
+    def _setup_variables(self):
+        """Analyze variable structure and identify optimization opportunities."""
+        in_vars = self.info.get('in_vars', [])
+        out_vars = self.info.get('out_vars', [])
+        
+        # Determine if inputs are nested (multi-modal)
+        self.nested_output = len(in_vars) > 0 and isinstance(in_vars[0], (list, tuple))
+        
+        # Get main variable for metadata
         self.main_var = in_vars[0][0] if self.nested_output else (in_vars[0] if in_vars else None)
         self.main_var_shape = self.root[self.main_var].shape if self.main_var else None
+        
+        # Find variables that appear in both input and output (optimization target)
+        flat_in_vars = []
+        if self.nested_output:
+            for group in in_vars:
+                flat_in_vars.extend(group)
+        else:
+            flat_in_vars = in_vars.copy()
+        
+        self.overlapping_vars = set(flat_in_vars) & set(out_vars)
 
-        # Load static latitude and longitude data if requested.
-        if self.info.get('latlon', False):
-            main_group = self.main_var.split('/')[0] if self.main_var else None
-            if main_group:
-                self.lat = self.root[main_group]['lat'][:].astype(np.float32)
-                self.lon = self.root[main_group]['lon'][:].astype(np.float32)
-            else:
-                warnings.warn("latlon requested but no main variable available")
+    def _load_static_data(self):
+        """Load static latitude/longitude data if requested."""
+        if not self.info.get('latlon', False):
+            return
+            
+        main_group = self.main_var.split('/')[0] if self.main_var else None
+        if main_group and main_group in self.root:
+            self.lat = self.root[main_group]['lat'][:].astype(np.float32)
+            self.lon = self.root[main_group]['lon'][:].astype(np.float32)
+        else:
+            warnings.warn("latlon requested but no main variable available")
 
     def __len__(self):
         return len(self.df)
-    
-    def _load_data(self, var: str, time_start: int, time_end: int, img_slice: tuple[slice, slice]) -> np.ndarray:
-        """
-        Loads and processes data for a single variable within a specified time and spatial range.
 
-        This internal helper handles variable-specific loading logic, including:
-        - Adjusting temporal and spatial slicing based on Zarr group attributes
-          (`interval_minutes`, `downscale_factor`).
-        - Special handling for 'aws' data (loading values and locations).
-        - Applying configured transformations.
-        - Handling temporal downsampling by ensuring correct indexing for the output.
-
-        Parameters:
-            var : str
-                The Zarr path to the variable (e.g., "radar/rtcor").
-            time_start : int
-                The starting time index (in 5-minute global steps) for the data segment.
-            time_end : int
-                The ending time index (exclusive, in 5-minute global steps) for the data segment.
-            img_slice : tuple[slice, slice]
-                A tuple of two slice objects `(slice(h0, h1), slice(w0, w1))` defining
-                the spatial region to load from the main variable's grid.
-
-        Returns:
-            Union[np.ndarray, tuple[np.ndarray, np.ndarray]]
-                The loaded and transformed data. For 'aws' data before interpolation,
-                it returns a tuple `(values, locations)`. Otherwise, it returns
-                a NumPy array.
-        """
-        # Extract the top-level Zarr group name (e.g., 'radar', 'harmonie')
+    def _get_temporal_slice(self, var: str, time_start: int, time_end: int) -> tuple:
+        """Get appropriate temporal slice for a variable based on its group properties."""
         group = var.split('/')[0]
-
-        # Get the temporal interval of the current group's data relative to the 5-minute global interval.
         t_scale = self.root[group].attrs['interval_minutes'] // 5
-
-        # Determine spatial slicing based on the group type and its downscale factor.
-        if group == 'aws':
-            # AWS data is typically sparse station data, not a grid, so spatial slicing is not applied directly.
-            scaled_img_slice = (slice(None),) # Load all stations
-        else:
-            # For gridded data, scale the image slice according to the group's downscale factor.
-            img_scale = self.root[group].attrs['downscale_factor']
-            scaled_img_slice = tuple(scale_slice(s, img_scale) for s in img_slice)
-
-        # Handle temporal indexing, especially for 'harmonie' (forecast model data).
-        # Harmonie data might have a forecast range (e.g., forecasts starting at certain lead times).
+        
+        # Handle special case for Harmonie forecast data
         if group == 'harmonie':
-            forecast_start = self.root[group].attrs['forecast_range'][0] # The first few forecasts are left out, as they contain model spin-up
-            # Adjust time indices based on forecast start and group's temporal scale.
-            t0_temp = time_start - forecast_start * 12 # 12 steps per hour for 5min interval
-            t1_temp = time_end - forecast_start * 12
-            forecast_idx = t0_temp // t_scale
-            time_range = (np.arange(t0_temp, t1_temp) - (forecast_idx * t_scale)) // 12
-            forecast_idx = max(forecast_idx, 0)
-            time_slice = (forecast_idx, slice(time_range[0], time_range[-1] + 1))
+            forecast_start = self.root[group].attrs['forecast_range'][0]
+            t0_adj = time_start - forecast_start * 12
+            t1_adj = time_end - forecast_start * 12
+            forecast_idx = max(t0_adj // t_scale, 0)
+            time_range = (np.arange(t0_adj, t1_adj) - (forecast_idx * t_scale)) // 12
+            return (forecast_idx, slice(time_range[0], time_range[-1] + 1)), time_range
         else:
-            # For other groups, simply scale the global time indices to the group's temporal resolution.
             time_range = np.arange(time_start, time_end) // t_scale
-            time_slice = (slice(time_range[0], time_range[-1] + 1),)
-        
-        has_channel = group == "harmonie" and len(self.root[var].shape) == 5
+            return (slice(time_range[0], time_range[-1] + 1),), time_range
 
-        # Build slice
-        if has_channel:
-            # Insert slice for first channel: (T, C, H, W) → select C=0
-            data_slice = time_slice + (slice(0, 1),) + scaled_img_slice
+    def _get_spatial_slice(self, var: str, spatial_slice: tuple[slice, slice]) -> tuple:
+        """Get appropriate spatial slice for a variable based on its group properties."""
+        group = var.split('/')[0]
+        
+        if group == 'aws':
+            return (slice(None),)  # AWS data loads all stations
         else:
-            data_slice = time_slice + scaled_img_slice
+            img_scale = self.root[group].attrs['downscale_factor']
+            return tuple(scale_slice(s, img_scale) for s in spatial_slice)
+        
+    def _load_variable_data(self, var: str, time_start: int, time_end: int, 
+                          spatial_slice: tuple[slice, slice]) -> np.ndarray:
+        """Load data for a single variable with all preprocessing applied."""
+        group = var.split('/')[0]
+        
+        # Get temporal and spatial slices
+        time_slice, time_range = self._get_temporal_slice(var, time_start, time_end)
+        scaled_spatial_slice = self._get_spatial_slice(var, spatial_slice)
+        
+        # Handle channel dimension for Harmonie data (Temp fix)
+        has_channel = group == "harmonie" and len(self.root[var].shape) == 5
+        if has_channel:
+            data_slice = time_slice + (slice(0, 1),) + scaled_spatial_slice
+        else:
+            data_slice = time_slice + scaled_spatial_slice
 
-        # Load data
-        frame = self.root[var][data_slice].astype(np.float32)
+        # Load raw data
+        data = self.root[var][data_slice].astype(np.float32)
         
         if has_channel:
-            frame = np.squeeze(frame, axis=1)
+            data = np.squeeze(data, axis=1)
 
-        # If the data is from 'aws', also load its corresponding location data.
+        # Handle AWS data (load locations too)
         if group == 'aws':
             locs = self.root[var + '_loc'][:]
-            frame = (frame, locs)
+            data = (data, locs)
 
-        # Apply transformations. Transformations can be defined for the entire group
-        # or for a specific variable. Group transforms take precedence.
+        # Apply transformations
         for transform_key in [group, var]:
             if transform_key in self.info.get('transforms', {}):
-                frame = self.info['transforms'][transform_key](frame)
+                data = self.info['transforms'][transform_key](data)
 
-        # Special handling for AWS data after transformation: if it has been
-        # interpolated into an image, crop it to match the main variable's spatial shape.
-        if group == 'aws' and frame.shape[-2:] == self.main_var_shape[-2:]:
-            # Crop the aws image in case other images are also cropped
-            data_slice = (slice(None),) + img_slice
-            frame = frame[data_slice]
+        # Post-transformation AWS handling
+        if group == 'aws' and hasattr(data, 'shape') and data.shape[-2:] == self.main_var_shape[-2:]:
+            crop_slice = (slice(None),) + spatial_slice
+            data = data[crop_slice]
 
-        # Handle temporal downsampling/upsampling:
-        # If the group's temporal resolution is different from the 5-minute global step,
-        # `time_range` might have duplicate indices. `np.unique(..., return_inverse=True)`
-        # ensures that data is correctly indexed to match the `context_len` or `forecast_len`.
+        # Handle temporal resampling
         _, inverse_indices = np.unique(time_range, return_inverse=True)
-        return frame[inverse_indices]
+        return data[inverse_indices]
     
-    def _load_group_data(self, group_vars: list[str], time_start: int, time_end: int, spatial_slice: tuple[slice, slice]) -> np.ndarray:
-        """
-        Loads and stacks all variables within a logical group along the channel dimension.
-
-        This is used when `in_vars` is a nested list, allowing multiple variables
-        (e.g., different satellite bands) to be treated as a single input group
-        to a model branch.
-
-        Parameters:
-            group_vars : list[str]
-                A list of Zarr paths to variables belonging to the same logical group.
-            time_start : int
-                The starting time index (global 5-minute step).
-            time_end : int
-                The ending time index (exclusive, global 5-minute step).
-            spatial_slice : tuple[slice, slice]
-                The spatial slice to apply to all variables in the group.
-
-        Returns:
-            np.ndarray
-                A NumPy array with all variables in the group concatenated along
-                a new channel dimension (shape: C, T, H, W).
-        """
-        group_data_list = []
-        for var in group_vars:
-            data = self._load_data(var, time_start, time_end, spatial_slice)
-            # Ensure the loaded data has a channel dimension (C, T, H, W).
-            # If it's (T, H, W), add a new dimension at axis 0.
-            if data.ndim == 3:
-                data = np.expand_dims(data, axis=0) # -> (1, T, H, W)
-            group_data_list.append(data)
-        # Concatenate all variables in the group along the channel dimension.
-        return np.concatenate(group_data_list, axis=0) # Resulting shape: (C_total, T, H, W)
+    def _ensure_channel_dim(self, data: np.ndarray) -> np.ndarray:
+        """Ensure data has channel dimension: (T,H,W) -> (1,T,H,W)."""
+        return np.expand_dims(data, axis=0) if data.ndim == 3 else data
+    
+    def _split_temporal_data(self, data: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Split full temporal data into context and forecast portions."""
+        context_data = data[:, :self.context_len, :, :]
+        forecast_data = data[:, self.context_len:self.context_len+self.forecast_len, :, :]
+        return context_data, forecast_data
     
     def _create_latlon_data(self, spatial_slice: tuple[slice, slice], time_len: int) -> np.ndarray:
-        """
-        Creates a NumPy array containing latitude and longitude maps for the given
-        spatial slice, broadcast across the time dimension.
+        """Create lat/lon data for the spatial slice and time length."""
+        if not hasattr(self, 'lat') or self.lat is None:
+            warnings.warn("Latitude/Longitude data not available")
+            return np.empty((2, time_len, 0, 0), dtype=np.float32)
 
-        This static geographical information can be useful as additional input
-        channels for a model.
-
-        Parameters:
-            spatial_slice : tuple[slice, slice]
-                The spatial slice to extract from the global latitude and longitude maps.
-            time_len : int
-                The desired length of the time dimension (e.g., `context_len` or `forecast_len`).
-
-        Returns:
-            np.ndarray
-                A NumPy array of shape `(2, T, H, W)` where the first channel is
-                latitude and the second is longitude, for the specified time length
-                and spatial region.
-        """
-        if self.lat is None or self.lon is None:
-            # Return an empty array or handle error if lat/lon data wasn't loaded
-            warnings.warn("Latitude/Longitude data not available for creation.")
-            return np.empty((2, time_len, 0, 0), dtype=np.float32) # Return empty array with correct dimensions
-
-        # Crop the global lat/lon maps to the current sample's spatial extent.
-        lat_cropped = self.lat[spatial_slice] # (H, W)
-        lon_cropped = self.lon[spatial_slice] # (H, W)
+        lat_crop = self.lat[spatial_slice]
+        lon_crop = self.lon[spatial_slice]
         
-        # Broadcast the 2D lat/lon maps to match the (T, H, W) shape.
-        lat_broadcast = np.broadcast_to(lat_cropped, (time_len, *lat_cropped.shape))
-        lon_broadcast = np.broadcast_to(lon_cropped, (time_len, *lon_cropped.shape))
-        
-        # Stack them along a new channel dimension to get (2, T, H, W).
+        lat_broadcast = np.broadcast_to(lat_crop, (time_len, *lat_crop.shape))
+        lon_broadcast = np.broadcast_to(lon_crop, (time_len, *lon_crop.shape))
+
         return np.stack([lat_broadcast, lon_broadcast], axis=0)
+    
+    def _load_context_data(self, t0: int, t1: int, spatial_slice: tuple, 
+                          full_data_cache: dict) -> any:
+        """Load and format context (input) data."""
+        in_vars = self.info.get('in_vars', [])
+        if not in_vars:
+            return None
 
+        # Generate timestamps if needed
+        context_timesteps = None
+        if self.include_timestamps:
+            context_timesteps = np.arange(-self.context_len + 1, 1, dtype=np.float32)
+
+        if self.nested_output:
+            return self._load_nested_context(in_vars, t0, t1, spatial_slice, 
+                                           full_data_cache, context_timesteps)
+        else:
+            return self._load_flat_context(in_vars, t0, t1, spatial_slice, 
+                                         full_data_cache)
+        
+    def _load_nested_context(self, in_vars: list, t0: int, t1: int, spatial_slice: tuple,
+                           full_data_cache: dict, context_timesteps: np.ndarray) -> list:
+        """Load context data in nested format (multi-modal)."""
+        context = []
+        
+        # Process each variable group
+        for group in in_vars:
+            group_data_list = []
+            for var in group:
+                if var in full_data_cache:
+                    # Use cached full-range data
+                    full_data = self._ensure_channel_dim(full_data_cache[var])
+                    context_part, _ = self._split_temporal_data(full_data)
+                    group_data_list.append(context_part)
+                else:
+                    # Load context portion only
+                    data = self._load_variable_data(var, t0, t1, spatial_slice)
+                    data = self._ensure_channel_dim(data)
+                    group_data_list.append(data)
+            
+            # Concatenate group variables and create element
+            group_data = np.concatenate(group_data_list, axis=0)
+            element = [group_data]
+            if self.include_timestamps:
+                element.append(context_timesteps.copy())
+            context.append(element)
+        
+        # Add lat/lon as separate group if requested
+        if self.info.get('latlon', False) and hasattr(self, 'lat'):
+            latlon_data = self._create_latlon_data(spatial_slice, self.context_len)
+            element = [latlon_data]
+            if self.include_timestamps:
+                element.append(context_timesteps.copy())
+            context.append(element)
+        
+        return context
+    
+    def _load_flat_context(self, in_vars: list, t0: int, t1: int, spatial_slice: tuple,
+                         full_data_cache: dict) -> np.ndarray:
+        """Load context data in flat format (single concatenated tensor)."""
+        context_data_list = []
+        
+        for var in in_vars:
+            if var in full_data_cache:
+                # Use cached full-range data
+                full_data = self._ensure_channel_dim(full_data_cache[var])
+                context_part, _ = self._split_temporal_data(full_data)
+                context_data_list.append(context_part)
+            else:
+                # Load context portion only
+                data = self._load_variable_data(var, t0, t1, spatial_slice)
+                data = self._ensure_channel_dim(data)
+                context_data_list.append(data)
+        
+        context = np.concatenate(context_data_list, axis=0)
+        
+        # Add lat/lon if requested
+        if self.info.get('latlon', False) and hasattr(self, 'lat'):
+            latlon_data = self._create_latlon_data(spatial_slice, self.context_len)
+            context = np.concatenate([context, latlon_data], axis=0)
+        
+        return context
+    
+    def _load_future_data(self, t1: int, t2: int, spatial_slice: tuple, 
+                         full_data_cache: dict) -> np.ndarray:
+        """Load and format future (target) data."""
+        out_vars = self.info.get('out_vars', [])
+        if not out_vars:
+            return None
+
+        future_data_list = []
+        for var in out_vars:
+            if var in full_data_cache:
+                # Use cached full-range data
+                full_data = self._ensure_channel_dim(full_data_cache[var])
+                _, forecast_part = self._split_temporal_data(full_data)
+                future_data_list.append(forecast_part)
+            else:
+                # Load forecast portion only
+                data = self._load_variable_data(var, t1, t2, spatial_slice)
+                data = self._ensure_channel_dim(data)
+                future_data_list.append(data)
+        
+        return np.concatenate(future_data_list, axis=0)
+    
     def __getitem__(self, idx: int):
         """
-        Retrieves a single data sample (context and/or future) from the dataset.
-
-        This method is called by PyTorch's DataLoader to fetch individual samples.
-        It orchestrates the loading of data based on the sample's indices,
-        applies transformations, and formats the output according to the
-        `in_vars` and `out_vars` configurations.
-
-        Parameters:
-            idx : int
-                The integer index of the sample to retrieve from the `self.df`.
-
-        Returns:
-            Union[Any, tuple[Any, Any]]
-                The data sample.
-                - If both `in_vars` and `out_vars` are defined, returns `(context, future)`.
-                - If only `in_vars` is defined, returns `context`.
-                - If only `out_vars` is defined, returns `future`.
-                The `context` can be a single `np.ndarray` or a `list` of `np.ndarray`
-                (or `list` of `[np.ndarray, np.ndarray]` if `include_timestamps` is True),
-                depending on `self.nested_output`. `future` is always a single `np.ndarray`.
-
-        Raises:
-            ValueError: If both context and future data are empty (no `in_vars` or `out_vars` defined).
+        Retrieve a single optimized data sample.
+        
+        Main optimization: Load overlapping variables once with full temporal range,
+        then split into context/forecast portions as needed.
         """
-
         # Extract sample coordinates
         t0, h0, w0 = self.df.loc[idx, ['t_idx', 'h_idx', 'w_idx']].astype(int)
 
-        # Calculate temporal ranges
+        # Calculate time ranges and spatial slice
         t1 = t0 + self.context_len
         t2 = t1 + self.forecast_len
+        
+        h0, w0 = h0 * self.block_size, w0 * self.block_size
+        h1, w1 = h0 + self.size[0] * self.block_size, w0 + self.size[1] * self.block_size
+        spatial_slice = (slice(h0, h1), slice(w0, w1))
 
-        # Calculate spatial slice
-        h0 = h0 * self.block_size
-        w0 = w0 * self.block_size
-        h1 = h0 + self.size[0]*self.block_size
-        w1 = w0 + self.size[1]*self.block_size
-        spatial_slice = (slice(h0,h1), slice(w0, w1))
+        # Load overlapping variables once with full temporal range
+        full_data_cache = {}
+        for var in self.overlapping_vars:
+            full_data_cache[var] = self._load_variable_data(var, t0, t2, spatial_slice)
 
-        # Generate timestamps if needed
-        if self.include_timestamps:
-            # Timestamps range from -(context_len - 1) to 0 (inclusive).
-            context_timesteps = np.arange(-self.context_len + 1, 1, dtype=np.float32)
+        # Load context and future data using optimized strategy
+        context = self._load_context_data(t0, t1, spatial_slice, full_data_cache)
+        future = self._load_future_data(t1, t2, spatial_slice, full_data_cache)
 
-        context = None
-        in_vars = self.info.get('in_vars', [])
-        if in_vars:
-            if self.nested_output:
-                # Nested list format
-                context = []
-                for group in in_vars:
-                    group_data = self._load_group_data(group, t0, t1, spatial_slice)
-                    
-                    # Create group element [data, (optional) timestamps]
-                    element = [group_data]
-                    if self.include_timestamps:
-                        element.append(context_timesteps.copy())
-                    context.append(element)
-                
-                # Add lat/lon as separate group
-                if self.info.get('latlon', False) and hasattr(self, 'lat'):
-                    latlon_data = self._create_latlon_data(spatial_slice, self.context_len)
-                    element = [latlon_data]
-                    if self.include_timestamps:
-                        element.append(context_timesteps.copy())
-                    context.append(element)
-            else:
-                # Traditional stacked format
-                context_data = []
-                for var in in_vars:
-                    data = self._load_data(var, t0, t1, spatial_slice)
-                    if data.ndim == 3:  # Add channel dim if missing
-                        data = np.expand_dims(data, axis=0)
-                    context_data.append(data)
-                
-                context = np.concatenate(context_data, axis=0)
-                
-                # Add lat/lon if requested
-                if self.info.get('latlon', False) and hasattr(self, 'lat'):
-                    latlon_data = self._create_latlon_data(spatial_slice, self.context_len)
-                    context = np.concatenate([context, latlon_data], axis=0)
-
-        # Load future data (always stacked)
-        future = None
-        out_vars = self.info.get('out_vars', [])
-        if out_vars:
-            future_data = []
-            for var in out_vars:
-                data = self._load_data(var, t1, t2, spatial_slice)
-                if data.ndim == 3:  # Add channel dim if missing
-                    data = np.expand_dims(data, axis=0)
-                future_data.append(data)
-            future = np.concatenate(future_data, axis=0)
-
-        # Return based on available data
+        # Return appropriate format
         if context is not None and future is not None:
             return context, future
         elif context is not None:
@@ -555,7 +518,7 @@ class NowcastingDataModule(L.LightningDataModule):
         # Get temporal metadata from the main Zarr group
         start_time = root[main_group].attrs['start_time']
         end_time = root[main_group].attrs['end_time']
-        min_interval = root[main_group].attrs['interval_minutes']
+        min_interval = 5 #root[main_group].attrs['interval_minutes']
         timestamps = pd.date_range(start_time, end_time, freq=f"{min_interval}min")
 
         # Define the full kernel size for sample generation: (temporal_length, height, width).

@@ -613,7 +613,7 @@ if __name__ == "__main__":
 
     # 3) Load your sample array (e.g., radar intensity data) using Zarr.
     # Replace this with the actual path to your Zarr dataset.
-    root = zarr.open_group('/vol/knmimo-nobackup/users/mrobben/nowcasting/data/dataset_regrid.zarr', mode='r')
+    root = zarr.open_group('/projects/prjs1634/nowcasting/data/dataset.zarr', mode='r')
     sample_array = root['radar/max_intensity_grid'][:]
 
     def create_time_mask(root, num_timesteps):
@@ -670,11 +670,22 @@ if __name__ == "__main__":
                  )
     
     # 8) Define the output directory for saving the Parquet files.
-    output_dir = "/vol/knmimo-nobackup/users/mrobben/nowcasting/data/tables"
+    output_dir = "/projects/prjs1634/nowcasting/data/tables"
 
     # 9) Save each DataFrame.
+    file_format = 'csv'
     for name, df in dfs.items():
-        file_path = os.path.join(output_dir, f"{name}.parquet")
-        df.to_parquet(file_path)
+        df = df[df['weight'] > (0.01 * (255/50))]
+        
+        # Define file path
+        file_path = os.path.join(output_dir, f"{name}.{file_format}")
+
+        # Save in the specified format
+        if file_format == 'parquet':
+            df.to_parquet(file_path)
+        elif file_format == 'csv':
+            df.to_csv(file_path, index=False)
+        else:
+            raise ValueError("Unsupported file format. Use 'parquet' or 'csv'.")
         print(name)
         print(df)

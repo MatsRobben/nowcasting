@@ -125,7 +125,7 @@ class NowcastingDataset(Dataset):
         """Validate include_crop parameter against nested group structure."""
         if not self.nested_input and self.include_crop:
             warnings.warn("include_crop is only supported for nested input structures. Ignoring.")
-            self.include_crop = False
+            self.include_crop = [False]
             return
             
         if isinstance(self.include_crop, list):
@@ -196,7 +196,7 @@ class NowcastingDataset(Dataset):
             w1 = w0 + size_tuple[1] * self.block_size
             return (slice(h0, h1), slice(w0, w1))
 
-        [get_slice_for_size(s) for s in self.size]
+        return [get_slice_for_size(s) for s in self.size]
 
     def _get_temporal_slice(self, var: str, time_start: int, time_end: int) -> tuple:
         """Get appropriate temporal slice for a variable based on its group properties."""
@@ -422,7 +422,7 @@ class NowcastingDataset(Dataset):
         spatial_slices = self._create_spatial_slices(h_idx, w_idx)
 
         # Prepare crop data
-        crop_data = np.array([h_idx, w_idx, self.size[0], self.size[1]], dtype=np.float32)
+        crop_data = np.array([h_idx, w_idx, self.size[0][0], self.size[0][1]], dtype=np.float32)
 
         # Load overlapping variables once with full temporal range
         full_data_cache = {}
@@ -532,7 +532,7 @@ class NowcastingDataModule(L.LightningDataModule):
         forecast_len: int = 18,
         include_timestamps: bool = False,
         include_crop: bool | list = False,
-        img_size: tuple[int, int] = (8, 8),
+        img_size: tuple[int, int] | list[tuple[int, int]] = (8, 8),
         stride: tuple[int, int, int] = (1, 1, 1),
         batch_size: int = 16,
         num_workers: int = 8,
@@ -604,7 +604,12 @@ class NowcastingDataModule(L.LightningDataModule):
         timestamps = pd.date_range(start_time, end_time, freq=f"{min_interval}min")
 
         # Define the full kernel size for sample generation: (temporal_length, height, width).
-        kernel = (self.context_len+self.forecast_len, ) + self.img_size
+        if isinstance(self.img_size[0], (list, tuple)):
+            # img_size is nested, use the first element
+            kernel = (self.context_len + self.forecast_len,) + tuple(self.img_size[0])
+        else:
+            # img_size is a simple tuple/list, use it directly
+            kernel = (self.context_len + self.forecast_len,) + self.img_size
 
         # Load the array used for sample weighting (e.g., max intensity grid).
         sample_array_path = self.var_info.get('sample_var')
@@ -836,8 +841,8 @@ if __name__ == "__main__":
         "in_vars": [
             # Example of nested 'in_vars': Each sub-list will be treated as a separate input group.
             # This is useful for multi-modal models that expect different data types as separate inputs.
-            ["radar/rtcor"], 
-            ["harmonie/TMP_GDS0_HTGL"]
+            "radar/rtcor", 
+            "harmonie/TMP_GDS0_HTGL"
             # Uncomment and adjust paths to include other satellite or harmonie data:
             # ["sat_l1p5/WV_062", "sat_l1p5/IR_108"],
             # ["harmonie/PRES_GDS0_GPML", "harmonie/DPT_GDS0_HTGL", "harmonie/R_H_GDS0_HTGL",
@@ -909,8 +914,8 @@ if __name__ == "__main__":
         split_info=split_info,
         context_len=4,       # 4 time steps for input
         forecast_len=18,     # 18 time steps for output
-        include_timestamps=True, # Include relative timestamps in context
-        include_crop=[False, True],
+        include_timestamps=False, # Include relative timestamps in context
+        include_crop=False,
         img_size=(8,8),      # Spatial patch size: 8 blocks x 8 blocks
         stride=(1,1,1),      # Sample generation stride (t, h, w)
         batch_size=8,        # Batch size for DataLoaders

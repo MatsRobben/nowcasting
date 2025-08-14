@@ -6,6 +6,7 @@ from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 import lightning as L
 
 from omegaconf import OmegaConf
+from omegaconf import ListConfig
 
 from typing import Optional
 import collections
@@ -145,8 +146,7 @@ class NowcastingDataset(Dataset):
         out_vars = self.info.get('out_vars', [])
         
         # Determine if inputs are nested (multi-modal)
-        self.nested_input = len(in_vars) > 0 and isinstance(in_vars[0], collections.abc.Sequence)
-        
+        self.nested_input = len(in_vars) > 0 and isinstance(in_vars[0], (list, ListConfig))
         # Get main variable for metadata
         self.main_var = in_vars[0][0] if self.nested_input else (in_vars[0] if in_vars else None)
         self.main_var_shape = self.root[self.main_var].shape if self.main_var else None
@@ -229,8 +229,6 @@ class NowcastingDataset(Dataset):
                 time_range = np.arange(start, start+length)
             else:
                 time_range = (np.arange(t0_adj, t1_adj) - (forecast_idx * t_scale)) // 12
-            
-            print(time_range)
 
             return (forecast_idx, slice(time_range[0], time_range[-1] + 1)), time_range
         else:
@@ -553,7 +551,7 @@ class NowcastingDataModule(L.LightningDataModule):
         context_len: int = 4,
         forecast_len: int = 18,
         include_timestamps: bool = False,
-        use_crop: bool | collections.abc.Sequence = False,
+        use_crop: bool | collections.abc.Sequence = True,
         img_size: collections.abc.Sequence[int, int] | collections.abc.Sequence[tuple[int, int]] = (8, 8),
         stride: collections.abc.Sequence[int, int, int] = (1, 1, 1),
         batch_size: int = 16,
@@ -864,7 +862,7 @@ if __name__ == "__main__":
             # Example of nested 'in_vars': Each sub-list will be treated as a separate input group.
             # This is useful for multi-modal models that expect different data types as separate inputs.
             # ["radar/rtcor"], 
-            ["harmonie/TMP_GDS0_HTGL"]
+            "harmonie/PRES_GDS0_GPML"
             # Uncomment and adjust paths to include other satellite or harmonie data:
             # ["sat_l1p5/WV_062", "sat_l1p5/IR_108"],
             # ["harmonie/PRES_GDS0_GPML", "harmonie/DPT_GDS0_HTGL", "harmonie/R_H_GDS0_HTGL",
@@ -872,9 +870,9 @@ if __name__ == "__main__":
             # If you prefer a single concatenated input tensor for all inputs, use a flat list:
             # "in_vars": ["radar/rtcor", "sat_l1p5/WV_062", "harmonie/PRES_GDS0_GPML"],
         ],
-        "out_vars": [
-            "radar/rtcor" # Target variable(s) for the model to predict
-        ],
+        # "out_vars": [
+        #     "radar/rtcor" # Target variable(s) for the model to predict
+        # ],
         # latlon: Set to True to include static latitude and longitude maps as additional input channels.
         "latlon": False, 
         "harmonie_forecasts": True,
@@ -885,7 +883,7 @@ if __name__ == "__main__":
             #     "default_rainrate": {"mean": 0.030197, "std": 0.539229}, # Convert radar data to dBZ and normalize
             # },
             # "harmonie": {"resize": {"scale": 2}},
-            "harmonie/TMP_GDS0_HTGL": {
+            "harmonie/PRES_GDS0_GPML": {
                 "normalize": {"mean": 282.99435754062006, "std": 6.236862884872817}
             },
             # "aws_inter/TOT_T_DRYB_10": {
@@ -939,10 +937,10 @@ if __name__ == "__main__":
         sample_info=sample_info,
         split_info=split_info,
         context_len=4,       # 4 time steps for input
-        forecast_len=18,     # 18 time steps for output
-        include_timestamps=True, # Include relative timestamps in context
-        use_crop=[True],
-        img_size=[(8,8)],      # Spatial patch size: 8 blocks x 8 blocks
+        forecast_len=0,     # 18 time steps for output
+        # include_timestamps=True, # Include relative timestamps in context
+        # use_crop=[True],
+        img_size=(8,8),      # Spatial patch size: 8 blocks x 8 blocks
         stride=(1,1,1),      # Sample generation stride (t, h, w)
         batch_size=8,        # Batch size for DataLoaders
         num_workers=8,       # Number of CPU workers for data loading

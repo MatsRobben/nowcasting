@@ -73,7 +73,7 @@ class NowcastingDataset(Dataset):
         df: pd.DataFrame,
         root: zarr.Group,
         info: dict,
-        size: tuple[int, int] = (8, 8),
+        size: tuple[int, int] | list[tuple[int, int]] = (8, 8),
         block_size: int = 32,
         context_len: int = 4,
         forecast_len: int = 18,
@@ -93,13 +93,37 @@ class NowcastingDataset(Dataset):
         # Analyze input/output structure
         self._setup_variables()
         self._validate_crop_parameter()
+        self._validate_size() 
         
         # Load static lat/lon data if needed
         self._load_static_data()
 
+    def _validate_size(self):
+        """Validate the size parameter and prepare it for nested use."""
+        in_vars = self.info.get('in_vars', [])
+        num_input_groups = len(in_vars)
+
+        # Check if the size is already in a nested format
+        is_size_nested = isinstance(self.size, (list, tuple)) and any(isinstance(x, (list, tuple)) for x in self.size)
+        
+        if is_size_nested:
+            # Validate length for pre-nested size
+            if len(self.size) != num_input_groups:
+                raise ValueError(
+                    f"Length of `size` list ({len(self.size)}) must match the number of "
+                    f"input groups ({num_input_groups})."
+                )
+        else:
+            # If size is not nested, make it nested.
+            # Handle cases with no input groups as a single group.
+            if num_input_groups == 0:
+                self.size = [self.size]
+            else:
+                self.size = [self.size] * num_input_groups
+
     def _validate_crop_parameter(self):
         """Validate include_crop parameter against nested group structure."""
-        if not self.nested_output and self.include_crop:
+        if not self.nested_input and self.include_crop:
             warnings.warn("include_crop is only supported for nested input structures. Ignoring.")
             self.include_crop = False
             return
@@ -110,7 +134,7 @@ class NowcastingDataset(Dataset):
                     "Length of include_crop list must match number of nested input groups. "
                     f"Expected {len(self.info['in_vars'])}, got {len(self.include_crop)}"
                 )
-        elif self.include_crop and self.nested_output:
+        elif self.include_crop and self.nested_input:
             # If single boolean True, apply to all groups
             self.include_crop = [True] * len(self.info['in_vars'])
 
@@ -120,15 +144,27 @@ class NowcastingDataset(Dataset):
         out_vars = self.info.get('out_vars', [])
         
         # Determine if inputs are nested (multi-modal)
-        self.nested_output = len(in_vars) > 0 and isinstance(in_vars[0], (list, tuple))
+        self.nested_input = len(in_vars) > 0 and isinstance(in_vars[0], (list, tuple))
         
         # Get main variable for metadata
-        self.main_var = in_vars[0][0] if self.nested_output else (in_vars[0] if in_vars else None)
+        self.main_var = in_vars[0][0] if self.nested_input else (in_vars[0] if in_vars else None)
         self.main_var_shape = self.root[self.main_var].shape if self.main_var else None
         
+        # Create a map of each input variable to its group index
+        self.in_var_to_group = {}
+        if self.nested_input:
+            for i, group in enumerate(in_vars):
+                for var in group:
+                    self.in_var_to_group[var] = i
+        else:
+            # For non-nested inputs, each variable is in group 0
+            for var in in_vars:
+                self.in_var_to_group[var] = 0
+
+
         # Find variables that appear in both input and output (optimization target)
         flat_in_vars = []
-        if self.nested_output:
+        if self.nested_input:
             for group in in_vars:
                 flat_in_vars.extend(group)
         else:
@@ -150,6 +186,17 @@ class NowcastingDataset(Dataset):
 
     def __len__(self):
         return len(self.df)
+
+    def _create_spatial_slices(self, h_idx: int, w_idx: int) -> tuple[slice, slice] | list[tuple[slice, slice]]:
+        """Create spatial slice(s) based on the size configuration."""
+        def get_slice_for_size(size_tuple):
+            h0 = h_idx * self.block_size
+            w0 = w_idx * self.block_size
+            h1 = h0 + size_tuple[0] * self.block_size
+            w1 = w0 + size_tuple[1] * self.block_size
+            return (slice(h0, h1), slice(w0, w1))
+
+        [get_slice_for_size(s) for s in self.size]
 
     def _get_temporal_slice(self, var: str, time_start: int, time_end: int) -> tuple:
         """Get appropriate temporal slice for a variable based on its group properties."""
@@ -243,7 +290,7 @@ class NowcastingDataset(Dataset):
 
         return np.stack([lat_broadcast, lon_broadcast], axis=0)
     
-    def _load_context_data(self, t0: int, t1: int, spatial_slice: tuple,
+    def _load_context_data(self, t0: int, t1: int, spatial_slices: list[tuple],
                            full_data_cache: dict, crop_data) -> any:
         """Load and format context (input) data."""
         in_vars = self.info.get('in_vars', [])
@@ -255,14 +302,14 @@ class NowcastingDataset(Dataset):
         if self.include_timestamps:
             context_timesteps = np.arange(-self.context_len + 1, 1, dtype=np.float32)
 
-        if self.nested_output:
-            return self._load_nested_context(in_vars, t0, t1, spatial_slice,
+        if self.nested_input:
+            return self._load_nested_context(in_vars, t0, t1, spatial_slices,
                                             full_data_cache, context_timesteps, crop_data)
         else:
-            return self._load_flat_context(in_vars, t0, t1, spatial_slice, 
+            return self._load_flat_context(in_vars, t0, t1, spatial_slices[0], 
                                          full_data_cache)
         
-    def _load_nested_context(self, in_vars: list, t0: int, t1: int, spatial_slice: tuple,
+    def _load_nested_context(self, in_vars: list, t0: int, t1: int, spatial_slices: tuple,
                            full_data_cache: dict, context_timesteps: np.ndarray,
                            crop_data: np.ndarray) -> list:
         """Load context data in nested format (multi-modal)."""
@@ -270,6 +317,8 @@ class NowcastingDataset(Dataset):
         
         # Process each variable group
         for i, group in enumerate(in_vars):
+            spatial_slice = spatial_slices[i]
+
             group_data_list = []
             for var in group:
                 if var in full_data_cache:
@@ -370,9 +419,7 @@ class NowcastingDataset(Dataset):
         t1 = t0 + self.context_len
         t2 = t1 + self.forecast_len
         
-        h0, w0 = h_idx * self.block_size, w_idx * self.block_size
-        h1, w1 = h0 + self.size[0] * self.block_size, w0 + self.size[1] * self.block_size
-        spatial_slice = (slice(h0, h1), slice(w0, w1))
+        spatial_slices = self._create_spatial_slices(h_idx, w_idx)
 
         # Prepare crop data
         crop_data = np.array([h_idx, w_idx, self.size[0], self.size[1]], dtype=np.float32)
@@ -380,11 +427,12 @@ class NowcastingDataset(Dataset):
         # Load overlapping variables once with full temporal range
         full_data_cache = {}
         for var in self.overlapping_vars:
-            full_data_cache[var] = self._load_variable_data(var, t0, t2, spatial_slice)
+            group_idx = self.in_var_to_group[var]
+            full_data_cache[var] = self._load_variable_data(var, t0, t2, spatial_slices[group_idx])
 
         # Load context and future data using optimized strategy
-        context = self._load_context_data(t0, t1, spatial_slice, full_data_cache, crop_data)
-        future = self._load_future_data(t1, t2, spatial_slice, full_data_cache)
+        context = self._load_context_data(t0, t1, spatial_slices, full_data_cache, crop_data)
+        future = self._load_future_data(t1, t2, spatial_slices[0], full_data_cache)
 
         # Return appropriate format
         if context is not None and future is not None:

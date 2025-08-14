@@ -8,6 +8,7 @@ import lightning as L
 from omegaconf import OmegaConf
 
 from typing import Optional
+import collections
 import warnings
 
 # Import custom transformation and sample generation utilities
@@ -78,7 +79,7 @@ class NowcastingDataset(Dataset):
         context_len: int = 4,
         forecast_len: int = 18,
         include_timestamps: bool = False,
-        include_crop: bool | list = False
+        use_crop: bool | collections.abc.Sequence = True
     ):
         self.df = df
         self.root = root
@@ -88,7 +89,7 @@ class NowcastingDataset(Dataset):
         self.context_len = context_len
         self.forecast_len = forecast_len
         self.include_timestamps = include_timestamps
-        self.include_crop = include_crop
+        self.use_crop = use_crop
 
         # Analyze input/output structure
         self._setup_variables()
@@ -104,7 +105,7 @@ class NowcastingDataset(Dataset):
         num_input_groups = len(in_vars)
 
         # Check if the size is already in a nested format
-        is_size_nested = isinstance(self.size, (list, tuple)) and any(isinstance(x, (list, tuple)) for x in self.size)
+        is_size_nested = isinstance(self.size, collections.abc.Sequence) and any(isinstance(x, collections.abc.Sequence) for x in self.size)
         
         if is_size_nested:
             # Validate length for pre-nested size
@@ -122,21 +123,21 @@ class NowcastingDataset(Dataset):
                 self.size = [self.size] * num_input_groups
 
     def _validate_crop_parameter(self):
-        """Validate include_crop parameter against nested group structure."""
-        if not self.nested_input and self.include_crop:
-            warnings.warn("include_crop is only supported for nested input structures. Ignoring.")
-            self.include_crop = [False]
+        """Validate use_crop parameter against nested group structure."""
+        if not self.nested_input and self.use_crop:
+            warnings.warn("use_crop is only supported for nested input structures. Ignoring.")
+            self.use_crop = [True]
             return
             
-        if isinstance(self.include_crop, list):
-            if len(self.include_crop) != len(self.info['in_vars']):
+        if isinstance(self.use_crop, collections.abc.Sequence):
+            if len(self.use_crop) != len(self.info['in_vars']):
                 raise ValueError(
-                    "Length of include_crop list must match number of nested input groups. "
-                    f"Expected {len(self.info['in_vars'])}, got {len(self.include_crop)}"
+                    "Length of use_crop list must match number of nested input groups. "
+                    f"Expected {len(self.info['in_vars'])}, got {len(self.use_crop)}"
                 )
-        elif self.include_crop and self.nested_input:
+        elif self.use_crop and self.nested_input:
             # If single boolean True, apply to all groups
-            self.include_crop = [True] * len(self.info['in_vars'])
+            self.use_crop = [True] * len(self.info['in_vars'])
 
     def _setup_variables(self):
         """Analyze variable structure and identify optimization opportunities."""
@@ -144,7 +145,7 @@ class NowcastingDataset(Dataset):
         out_vars = self.info.get('out_vars', [])
         
         # Determine if inputs are nested (multi-modal)
-        self.nested_input = len(in_vars) > 0 and isinstance(in_vars[0], (list, tuple))
+        self.nested_input = len(in_vars) > 0 and isinstance(in_vars[0], collections.abc.Sequence)
         
         # Get main variable for metadata
         self.main_var = in_vars[0][0] if self.nested_input else (in_vars[0] if in_vars else None)
@@ -197,6 +198,29 @@ class NowcastingDataset(Dataset):
             return (slice(h0, h1), slice(w0, w1))
 
         return [get_slice_for_size(s) for s in self.size]
+    
+    def _create_spatial_slices(self, h_idx: int, w_idx: int) -> list[tuple[slice, slice]]:
+        """Create spatial slice(s) based on the size and crop configuration."""
+        
+        spatial_slices = []
+        for size, crop_flag in zip(self.size, self.use_crop):
+            if crop_flag:
+                # Use the randomized indices from the DataFrame
+                h0 = h_idx * self.block_size
+                w0 = w_idx * self.block_size
+                h1 = h0 + size[0] * self.block_size
+                w1 = w0 + size[1] * self.block_size
+            else:
+                # Use a fixed index of 0 to get a non-randomized, full-image crop
+                h0 = 0
+                w0 = 0
+                # Use the full size of the group
+                h1 = size[0] * self.block_size
+                w1 = size[1] * self.block_size
+            
+            spatial_slices.append((slice(h0, h1), slice(w0, w1)))
+
+        return spatial_slices
 
     def _get_temporal_slice(self, var: str, time_start: int, time_end: int) -> tuple:
         """Get appropriate temporal slice for a variable based on its group properties."""
@@ -341,7 +365,7 @@ class NowcastingDataset(Dataset):
                 element.append(context_timesteps.copy())
             
             # Add crop info if requested for this group
-            if isinstance(self.include_crop, list) and self.include_crop[i]:
+            if isinstance(self.use_crop, collections.abc.Sequence) and not self.use_crop[i]:
                 element.append(crop_data.copy())
 
             context.append(element)
@@ -531,9 +555,9 @@ class NowcastingDataModule(L.LightningDataModule):
         context_len: int = 4,
         forecast_len: int = 18,
         include_timestamps: bool = False,
-        include_crop: bool | list = False,
-        img_size: tuple[int, int] | list[tuple[int, int]] = (8, 8),
-        stride: tuple[int, int, int] = (1, 1, 1),
+        use_crop: bool | collections.abc.Sequence = False,
+        img_size: collections.abc.Sequence[int, int] | collections.abc.Sequence[tuple[int, int]] = (8, 8),
+        stride: collections.abc.Sequence[int, int, int] = (1, 1, 1),
         batch_size: int = 16,
         num_workers: int = 8,
     ):
@@ -545,7 +569,7 @@ class NowcastingDataModule(L.LightningDataModule):
         self.context_len = context_len
         self.forecast_len = forecast_len
         self.include_timestamps = include_timestamps
-        self.include_crop = include_crop
+        self.use_crop = use_crop
         self.img_size = img_size
         self.stride = stride
         self.batch_size = batch_size
@@ -604,7 +628,7 @@ class NowcastingDataModule(L.LightningDataModule):
         timestamps = pd.date_range(start_time, end_time, freq=f"{min_interval}min")
 
         # Define the full kernel size for sample generation: (temporal_length, height, width).
-        if isinstance(self.img_size[0], (list, tuple)):
+        if isinstance(self.img_size[0], collections.abc.Sequence):
             # img_size is nested, use the first element
             kernel = (self.context_len + self.forecast_len,) + tuple(self.img_size[0])
         else:
@@ -661,7 +685,7 @@ class NowcastingDataModule(L.LightningDataModule):
                 context_len=self.context_len,
                 forecast_len=self.forecast_len,
                 include_timestamps=self.include_timestamps,
-                include_crop=self.include_crop
+                use_crop=self.use_crop
             )
             # Create a weighted sampler only for the training dataset if 'bins' are configured.
             if name == 'train' and 'bins' in self.sample_info:
@@ -841,8 +865,8 @@ if __name__ == "__main__":
         "in_vars": [
             # Example of nested 'in_vars': Each sub-list will be treated as a separate input group.
             # This is useful for multi-modal models that expect different data types as separate inputs.
-            "radar/rtcor", 
-            "harmonie/TMP_GDS0_HTGL"
+            ["radar/rtcor"], 
+            ["aws_inter/TOT_T_DRYB_10"]
             # Uncomment and adjust paths to include other satellite or harmonie data:
             # ["sat_l1p5/WV_062", "sat_l1p5/IR_108"],
             # ["harmonie/PRES_GDS0_GPML", "harmonie/DPT_GDS0_HTGL", "harmonie/R_H_GDS0_HTGL",
@@ -861,9 +885,12 @@ if __name__ == "__main__":
             "radar": {
                 "default_rainrate": {"mean": 0.030197, "std": 0.539229}, # Convert radar data to dBZ and normalize
             },
-            "harmonie": {"resize": {"scale": 2}},
-            "harmonie/TMP_GDS0_HTGL": {
-                "normalize": {"mean": 282.99435754062006, "std": 6.236862884872817}
+            # "harmonie": {"resize": {"scale": 2}},
+            # "harmonie/TMP_GDS0_HTGL": {
+            #     "normalize": {"mean": 282.99435754062006, "std": 6.236862884872817}
+            # },
+            "aws_inter/TOT_T_DRYB_10": {
+                "normalize": {"mean": 11.296092, "std": 6.215682}
             }
         }
     }
@@ -914,9 +941,9 @@ if __name__ == "__main__":
         split_info=split_info,
         context_len=4,       # 4 time steps for input
         forecast_len=18,     # 18 time steps for output
-        include_timestamps=False, # Include relative timestamps in context
-        include_crop=False,
-        img_size=(8,8),      # Spatial patch size: 8 blocks x 8 blocks
+        include_timestamps=True, # Include relative timestamps in context
+        use_crop=[True, False],
+        img_size=[(8,8), (24,22)],      # Spatial patch size: 8 blocks x 8 blocks
         stride=(1,1,1),      # Sample generation stride (t, h, w)
         batch_size=8,        # Batch size for DataLoaders
         num_workers=8,       # Number of CPU workers for data loading

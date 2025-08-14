@@ -244,7 +244,7 @@ class NowcastingDataset(Dataset):
         return np.stack([lat_broadcast, lon_broadcast], axis=0)
     
     def _load_context_data(self, t0: int, t1: int, spatial_slice: tuple,
-                           full_data_cache: dict, h0: int, w0: int) -> any:
+                           full_data_cache: dict, crop_data) -> any:
         """Load and format context (input) data."""
         in_vars = self.info.get('in_vars', [])
         if not in_vars:
@@ -254,9 +254,6 @@ class NowcastingDataset(Dataset):
         context_timesteps = None
         if self.include_timestamps:
             context_timesteps = np.arange(-self.context_len + 1, 1, dtype=np.float32)
-
-        # Prepare crop data
-        crop_data = np.array([h0, w0], dtype=np.float32)
 
         if self.nested_output:
             return self._load_nested_context(in_vars, t0, t1, spatial_slice,
@@ -272,7 +269,7 @@ class NowcastingDataset(Dataset):
         context = []
         
         # Process each variable group
-        for group in in_vars:
+        for i, group in enumerate(in_vars):
             group_data_list = []
             for var in group:
                 if var in full_data_cache:
@@ -377,13 +374,16 @@ class NowcastingDataset(Dataset):
         h1, w1 = h0 + self.size[0] * self.block_size, w0 + self.size[1] * self.block_size
         spatial_slice = (slice(h0, h1), slice(w0, w1))
 
+        # Prepare crop data
+        crop_data = np.array([h_idx, w_idx, self.size[0], self.size[1]], dtype=np.float32)
+
         # Load overlapping variables once with full temporal range
         full_data_cache = {}
         for var in self.overlapping_vars:
             full_data_cache[var] = self._load_variable_data(var, t0, t2, spatial_slice)
 
         # Load context and future data using optimized strategy
-        context = self._load_context_data(t0, t1, spatial_slice, full_data_cache, h0, w0)
+        context = self._load_context_data(t0, t1, spatial_slice, full_data_cache, crop_data)
         future = self._load_future_data(t1, t2, spatial_slice, full_data_cache)
 
         # Return appropriate format
@@ -483,6 +483,7 @@ class NowcastingDataModule(L.LightningDataModule):
         context_len: int = 4,
         forecast_len: int = 18,
         include_timestamps: bool = False,
+        include_crop: bool | list = False,
         img_size: tuple[int, int] = (8, 8),
         stride: tuple[int, int, int] = (1, 1, 1),
         batch_size: int = 16,
@@ -496,6 +497,7 @@ class NowcastingDataModule(L.LightningDataModule):
         self.context_len = context_len
         self.forecast_len = forecast_len
         self.include_timestamps = include_timestamps
+        self.include_crop = include_crop
         self.img_size = img_size
         self.stride = stride
         self.batch_size = batch_size
@@ -605,7 +607,8 @@ class NowcastingDataModule(L.LightningDataModule):
                 size=self.img_size,
                 context_len=self.context_len,
                 forecast_len=self.forecast_len,
-                include_timestamps=self.include_timestamps
+                include_timestamps=self.include_timestamps,
+                include_crop=self.include_crop
             )
             # Create a weighted sampler only for the training dataset if 'bins' are configured.
             if name == 'train' and 'bins' in self.sample_info:
@@ -777,7 +780,7 @@ if __name__ == "__main__":
 
     # --- Configuration Parameters ---
     # Define the path to your Zarr dataset. Replace with your actual path.
-    path = '/vol/knmimo-nobackup/users/mrobben/nowcasting/data/dataset_regrid.zarr'
+    path = '/vol/knmimo-nobackup/users/mrobben/nowcasting/data/dataset.zarr'
 
     # var_info: Defines which variables to load, their transformations, and how inputs are structured.
     var_info = {
@@ -785,8 +788,8 @@ if __name__ == "__main__":
         "in_vars": [
             # Example of nested 'in_vars': Each sub-list will be treated as a separate input group.
             # This is useful for multi-modal models that expect different data types as separate inputs.
-            "radar/rtcor", 
-            "harmonie/TMP_GDS0_HTGL"
+            ["radar/rtcor"], 
+            ["harmonie/TMP_GDS0_HTGL"]
             # Uncomment and adjust paths to include other satellite or harmonie data:
             # ["sat_l1p5/WV_062", "sat_l1p5/IR_108"],
             # ["harmonie/PRES_GDS0_GPML", "harmonie/DPT_GDS0_HTGL", "harmonie/R_H_GDS0_HTGL",
@@ -858,7 +861,8 @@ if __name__ == "__main__":
         split_info=split_info,
         context_len=4,       # 4 time steps for input
         forecast_len=18,     # 18 time steps for output
-        include_timestamps=False, # Include relative timestamps in context
+        include_timestamps=True, # Include relative timestamps in context
+        include_crop=[False, True],
         img_size=(8,8),      # Spatial patch size: 8 blocks x 8 blocks
         stride=(1,1,1),      # Sample generation stride (t, h, w)
         batch_size=8,        # Batch size for DataLoaders

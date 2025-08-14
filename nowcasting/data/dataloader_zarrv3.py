@@ -77,7 +77,8 @@ class NowcastingDataset(Dataset):
         block_size: int = 32,
         context_len: int = 4,
         forecast_len: int = 18,
-        include_timestamps: bool = False
+        include_timestamps: bool = False,
+        include_crop: bool | list = False
     ):
         self.df = df
         self.root = root
@@ -87,12 +88,31 @@ class NowcastingDataset(Dataset):
         self.context_len = context_len
         self.forecast_len = forecast_len
         self.include_timestamps = include_timestamps
+        self.include_crop = include_crop
 
         # Analyze input/output structure
         self._setup_variables()
+        self._validate_crop_parameter()
         
         # Load static lat/lon data if needed
         self._load_static_data()
+
+    def _validate_crop_parameter(self):
+        """Validate include_crop parameter against nested group structure."""
+        if not self.nested_output and self.include_crop:
+            warnings.warn("include_crop is only supported for nested input structures. Ignoring.")
+            self.include_crop = False
+            return
+            
+        if isinstance(self.include_crop, list):
+            if len(self.include_crop) != len(self.info['in_vars']):
+                raise ValueError(
+                    "Length of include_crop list must match number of nested input groups. "
+                    f"Expected {len(self.info['in_vars'])}, got {len(self.include_crop)}"
+                )
+        elif self.include_crop and self.nested_output:
+            # If single boolean True, apply to all groups
+            self.include_crop = [True] * len(self.info['in_vars'])
 
     def _setup_variables(self):
         """Analyze variable structure and identify optimization opportunities."""
@@ -223,8 +243,8 @@ class NowcastingDataset(Dataset):
 
         return np.stack([lat_broadcast, lon_broadcast], axis=0)
     
-    def _load_context_data(self, t0: int, t1: int, spatial_slice: tuple, 
-                          full_data_cache: dict) -> any:
+    def _load_context_data(self, t0: int, t1: int, spatial_slice: tuple,
+                           full_data_cache: dict, h0: int, w0: int) -> any:
         """Load and format context (input) data."""
         in_vars = self.info.get('in_vars', [])
         if not in_vars:
@@ -235,15 +255,19 @@ class NowcastingDataset(Dataset):
         if self.include_timestamps:
             context_timesteps = np.arange(-self.context_len + 1, 1, dtype=np.float32)
 
+        # Prepare crop data
+        crop_data = np.array([h0, w0], dtype=np.float32)
+
         if self.nested_output:
-            return self._load_nested_context(in_vars, t0, t1, spatial_slice, 
-                                           full_data_cache, context_timesteps)
+            return self._load_nested_context(in_vars, t0, t1, spatial_slice,
+                                            full_data_cache, context_timesteps, crop_data)
         else:
             return self._load_flat_context(in_vars, t0, t1, spatial_slice, 
                                          full_data_cache)
         
     def _load_nested_context(self, in_vars: list, t0: int, t1: int, spatial_slice: tuple,
-                           full_data_cache: dict, context_timesteps: np.ndarray) -> list:
+                           full_data_cache: dict, context_timesteps: np.ndarray,
+                           crop_data: np.ndarray) -> list:
         """Load context data in nested format (multi-modal)."""
         context = []
         
@@ -265,8 +289,15 @@ class NowcastingDataset(Dataset):
             # Concatenate group variables and create element
             group_data = np.concatenate(group_data_list, axis=0)
             element = [group_data]
+
+            # Add timestamps if requested
             if self.include_timestamps:
                 element.append(context_timesteps.copy())
+            
+            # Add crop info if requested for this group
+            if isinstance(self.include_crop, list) and self.include_crop[i]:
+                element.append(crop_data.copy())
+
             context.append(element)
         
         # Add lat/lon as separate group if requested
@@ -335,13 +366,14 @@ class NowcastingDataset(Dataset):
         then split into context/forecast portions as needed.
         """
         # Extract sample coordinates
-        t0, h0, w0 = self.df.loc[idx, ['t_idx', 'h_idx', 'w_idx']].astype(int)
+        t_idx, h_idx, w_idx = self.df.loc[idx, ['t_idx', 'h_idx', 'w_idx']].astype(int)
 
         # Calculate time ranges and spatial slice
+        t0 = t_idx
         t1 = t0 + self.context_len
         t2 = t1 + self.forecast_len
         
-        h0, w0 = h0 * self.block_size, w0 * self.block_size
+        h0, w0 = h_idx * self.block_size, w_idx * self.block_size
         h1, w1 = h0 + self.size[0] * self.block_size, w0 + self.size[1] * self.block_size
         spatial_slice = (slice(h0, h1), slice(w0, w1))
 
@@ -351,7 +383,7 @@ class NowcastingDataset(Dataset):
             full_data_cache[var] = self._load_variable_data(var, t0, t2, spatial_slice)
 
         # Load context and future data using optimized strategy
-        context = self._load_context_data(t0, t1, spatial_slice, full_data_cache)
+        context = self._load_context_data(t0, t1, spatial_slice, full_data_cache, h0, w0)
         future = self._load_future_data(t1, t2, spatial_slice, full_data_cache)
 
         # Return appropriate format

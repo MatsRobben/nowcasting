@@ -187,17 +187,6 @@ class NowcastingDataset(Dataset):
 
     def __len__(self):
         return len(self.df)
-
-    def _create_spatial_slices(self, h_idx: int, w_idx: int) -> tuple[slice, slice] | list[tuple[slice, slice]]:
-        """Create spatial slice(s) based on the size configuration."""
-        def get_slice_for_size(size_tuple):
-            h0 = h_idx * self.block_size
-            w0 = w_idx * self.block_size
-            h1 = h0 + size_tuple[0] * self.block_size
-            w1 = w0 + size_tuple[1] * self.block_size
-            return (slice(h0, h1), slice(w0, w1))
-
-        return [get_slice_for_size(s) for s in self.size]
     
     def _create_spatial_slices(self, h_idx: int, w_idx: int) -> list[tuple[slice, slice]]:
         """Create spatial slice(s) based on the size and crop configuration."""
@@ -233,7 +222,16 @@ class NowcastingDataset(Dataset):
             t0_adj = time_start - forecast_start * 12
             t1_adj = time_end - forecast_start * 12
             forecast_idx = max(t0_adj // t_scale, 0)
-            time_range = (np.arange(t0_adj, t1_adj) - (forecast_idx * t_scale)) // 12
+
+            if self.info.get('harmonie_forecasts', False):
+                length = time_end - time_start
+                start = (t0_adj - (forecast_idx * t_scale)) // 12
+                time_range = np.arange(start, start+length)
+            else:
+                time_range = (np.arange(t0_adj, t1_adj) - (forecast_idx * t_scale)) // 12
+            
+            print(time_range)
+
             return (forecast_idx, slice(time_range[0], time_range[-1] + 1)), time_range
         else:
             time_range = np.arange(time_start, time_end) // t_scale
@@ -865,8 +863,8 @@ if __name__ == "__main__":
         "in_vars": [
             # Example of nested 'in_vars': Each sub-list will be treated as a separate input group.
             # This is useful for multi-modal models that expect different data types as separate inputs.
-            ["radar/rtcor"], 
-            ["aws_inter/TOT_T_DRYB_10"]
+            # ["radar/rtcor"], 
+            ["harmonie/TMP_GDS0_HTGL"]
             # Uncomment and adjust paths to include other satellite or harmonie data:
             # ["sat_l1p5/WV_062", "sat_l1p5/IR_108"],
             # ["harmonie/PRES_GDS0_GPML", "harmonie/DPT_GDS0_HTGL", "harmonie/R_H_GDS0_HTGL",
@@ -879,19 +877,20 @@ if __name__ == "__main__":
         ],
         # latlon: Set to True to include static latitude and longitude maps as additional input channels.
         "latlon": False, 
+        "harmonie_forecasts": True,
         "transforms": {
             # Define transformations to apply to specific Zarr groups or variables.
             # These refer to functions defined in `nowcasting.data.utils.transforms`.
-            "radar": {
-                "default_rainrate": {"mean": 0.030197, "std": 0.539229}, # Convert radar data to dBZ and normalize
-            },
-            # "harmonie": {"resize": {"scale": 2}},
-            # "harmonie/TMP_GDS0_HTGL": {
-            #     "normalize": {"mean": 282.99435754062006, "std": 6.236862884872817}
+            # "radar": {
+            #     "default_rainrate": {"mean": 0.030197, "std": 0.539229}, # Convert radar data to dBZ and normalize
             # },
-            "aws_inter/TOT_T_DRYB_10": {
-                "normalize": {"mean": 11.296092, "std": 6.215682}
-            }
+            # "harmonie": {"resize": {"scale": 2}},
+            "harmonie/TMP_GDS0_HTGL": {
+                "normalize": {"mean": 282.99435754062006, "std": 6.236862884872817}
+            },
+            # "aws_inter/TOT_T_DRYB_10": {
+            #     "normalize": {"mean": 11.296092, "std": 6.215682}
+            # }
         }
     }
 
@@ -942,8 +941,8 @@ if __name__ == "__main__":
         context_len=4,       # 4 time steps for input
         forecast_len=18,     # 18 time steps for output
         include_timestamps=True, # Include relative timestamps in context
-        use_crop=[True, False],
-        img_size=[(8,8), (24,22)],      # Spatial patch size: 8 blocks x 8 blocks
+        use_crop=[True],
+        img_size=[(8,8)],      # Spatial patch size: 8 blocks x 8 blocks
         stride=(1,1,1),      # Sample generation stride (t, h, w)
         batch_size=8,        # Batch size for DataLoaders
         num_workers=8,       # Number of CPU workers for data loading

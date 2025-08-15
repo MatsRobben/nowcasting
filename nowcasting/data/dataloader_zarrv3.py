@@ -868,41 +868,96 @@ if __name__ == "__main__":
     path = '/vol/knmimo-nobackup/users/mrobben/nowcasting/data/dataset.zarr'
 
     # var_info: Defines which variables to load, their transformations, and how inputs are structured.
+    # var_info = {
+    #     "sample_var": "radar/max_intensity_grid", # Variable used to generate sample weights
+    #     "in_vars": [
+    #         # Example of nested 'in_vars': Each sub-list will be treated as a separate input group.
+    #         # This is useful for multi-modal models that expect different data types as separate inputs.
+    #         # ["radar/rtcor"], 
+    #         "harmonie/PRES_GDS0_GPML", # Presure
+    #         "harmonie/TMP_GDS0_HTGL", # Temperature
+    #         "harmonie/DPT_GDS0_HTGL", # Dew point Temperature
+    #         "harmonie/U_GRD_GDS0_HTGL", # U component of wind
+    #         "harmonie/V_GRD_GDS0_HTGL", # V component of wind
+    #         "harmonie/R_H_GDS0_HTGL", # Relative Humitaty
+    #         "harmonie/A_PCP_GDS0_HTGL_acc", # Total Precipitaiton 
+    #         "harmonie/T_CDC_GDS0_HTGL", # Total cloud cover
+    #         "harmonie/KNMI_var_201_entatm", # Graupel (Entire atmosphere)
+    #         # Uncomment and adjust paths to include other satellite or harmonie data:
+    #         # ["sat_l1p5/WV_062", "sat_l1p5/IR_108"],
+    #         # ["harmonie/PRES_GDS0_GPML", "harmonie/DPT_GDS0_HTGL", "harmonie/R_H_GDS0_HTGL",
+    #         #  "harmonie/A_PCP_GDS0_HTGL_acc", "harmonie/T_CDC_GDS0_HTGL", "harmonie/KNMI_var_201_entatm"],
+    #         # If you prefer a single concatenated input tensor for all inputs, use a flat list:
+    #         # "in_vars": ["radar/rtcor", "sat_l1p5/WV_062", "harmonie/PRES_GDS0_GPML"],
+    #     ],
+    #     # "out_vars": [
+    #     #     "radar/rtcor" # Target variable(s) for the model to predict
+    #     # ],
+    #     # latlon: Set to True to include static latitude and longitude maps as additional input channels.
+    #     "latlon": False, 
+    #     "harmonie_forecasts": True,
+    #     "transforms": {
+    #         # Define transformations to apply to specific Zarr groups or variables.
+    #         # These refer to functions defined in `nowcasting.data.utils.transforms`.
+    #         # "radar": {
+    #         #     "default_rainrate": {"mean": 0.030197, "std": 0.539229}, # Convert radar data to dBZ and normalize
+    #         # },
+    #         # "harmonie": {"resize": {"scale": 2}},
+    #         "harmonie/PRES_GDS0_GPML": {
+    #             "normalize": {"mean": 282.99435754062006, "std": 6.236862884872817}
+    #         },
+    #         # "aws_inter/TOT_T_DRYB_10": {
+    #         #     "normalize": {"mean": 11.296092, "std": 6.215682}
+    #         # }
+    #     }
+    # }
+
     var_info = {
-        "sample_var": "radar/max_intensity_grid", # Variable used to generate sample weights
-        "in_vars": [
-            # Example of nested 'in_vars': Each sub-list will be treated as a separate input group.
-            # This is useful for multi-modal models that expect different data types as separate inputs.
-            # ["radar/rtcor"], 
-            "harmonie/PRES_GDS0_GPML"
-            # Uncomment and adjust paths to include other satellite or harmonie data:
-            # ["sat_l1p5/WV_062", "sat_l1p5/IR_108"],
-            # ["harmonie/PRES_GDS0_GPML", "harmonie/DPT_GDS0_HTGL", "harmonie/R_H_GDS0_HTGL",
-            #  "harmonie/A_PCP_GDS0_HTGL_acc", "harmonie/T_CDC_GDS0_HTGL", "harmonie/KNMI_var_201_entatm"],
-            # If you prefer a single concatenated input tensor for all inputs, use a flat list:
-            # "in_vars": ["radar/rtcor", "sat_l1p5/WV_062", "harmonie/PRES_GDS0_GPML"],
-        ],
-        # "out_vars": [
-        #     "radar/rtcor" # Target variable(s) for the model to predict
-        # ],
-        # latlon: Set to True to include static latitude and longitude maps as additional input channels.
-        "latlon": False, 
+        "sample_var": "radar/max_intensity_grid",
+        "latlon": False,
         "harmonie_forecasts": True,
+        "in_vars": [
+            "harmonie/PRES_GDS0_GPML",  # Presure
+            "harmonie/TMP_GDS0_HTGL",  # Temperature
+            "harmonie/DPT_GDS0_HTGL",  # Dew point Temperature
+            "harmonie/U_GRD_GDS0_HTGL",  # U component of wind
+            "harmonie/V_GRD_GDS0_HTGL",  # V component of wind
+            "harmonie/R_H_GDS0_HTGL",  # Relative Humitaty
+            "harmonie/A_PCP_GDS0_HTGL_acc",  # Total Precipitaiton
+            "harmonie/T_CDC_GDS0_HTGL",  # Total cloud cover
+            "harmonie/KNMI_var_201_entatm",  # Graupel (Entire atmosphere)
+        ],
         "transforms": {
-            # Define transformations to apply to specific Zarr groups or variables.
-            # These refer to functions defined in `nowcasting.data.utils.transforms`.
-            # "radar": {
-            #     "default_rainrate": {"mean": 0.030197, "std": 0.539229}, # Convert radar data to dBZ and normalize
-            # },
-            # "harmonie": {"resize": {"scale": 2}},
             "harmonie/PRES_GDS0_GPML": {
+                "normalize": {"mean": 101561.22319815714, "std": 1086.8065468683621}
+            },
+            "harmonie/DPT_GDS0_HTGL": {
+                "normalize": {"mean": 280.02349829680645, "std": 5.57281521209835}
+            },
+            "harmonie/R_H_GDS0_HTGL": {
+                "normalize": {"mean": 0.8194103129556326, "std": 0.14297640025250816}
+            },
+            "harmonie/A_PCP_GDS0_HTGL_acc": {
+                "normalize": {"mean": 0.09991637987204555, "std": 0.45573451345607613}
+            },
+            "harmonie/T_CDC_GDS0_HTGL": {
+                "normalize": {"mean": 0.7056532355251186, "std": 0.4124938691551687}
+            },
+            "harmonie/KNMI_var_201_entatm": {
+                "normalize": {"mean": 0.01663923929552923, "std": 0.1512492953711808}
+            },
+            "harmonie/TMP_GDS0_HTGL": {
                 "normalize": {"mean": 282.99435754062006, "std": 6.236862884872817}
             },
-            # "aws_inter/TOT_T_DRYB_10": {
-            #     "normalize": {"mean": 11.296092, "std": 6.215682}
-            # }
-        }
+            "harmonie/U_GRD_GDS0_HTGL": {
+                "normalize": {"mean": 2.067854756241567, "std": 6.07311070186992}
+            },
+            "harmonie/V_GRD_GDS0_HTGL": {
+                "normalize": {"mean": 1.2600543556072512, "std": 6.145160154787648}
+            },
+        },
     }
+
 
     # split_info: Defines how the dataset is split into train/val/test sets based on time.
     split_info = {
@@ -912,7 +967,7 @@ if __name__ == "__main__":
             "train": {} # All remaining data for the training set (acts as a default)
         },
         # apply_missing_masks: List of Zarr groups whose 'time_mask' should be used to filter out missing data.
-        'apply_missing_masks': ['radar', 'harmonie', 'sat_l2', 'sat_l1p5', 'aws'],
+        'apply_missing_masks': ['radar', 'harmonie', 'sat_l2', 'sat_l1p5', 'aws_inter'],
         # clutter_threshold: Radar clutter score threshold. Samples with clutter score > 50 are ignored.
         'clutter_threshold': 50,
     }   
@@ -953,7 +1008,7 @@ if __name__ == "__main__":
         # include_timestamps=True, # Include relative timestamps in context
         # use_crop=[True],
         img_size=(8,8),      # Spatial patch size: 8 blocks x 8 blocks
-        stride=(1,1,1),      # Sample generation stride (t, h, w)
+        stride=(4,1,1),      # Sample generation stride (t, h, w)
         batch_size=8,        # Batch size for DataLoaders
         num_workers=8,       # Number of CPU workers for data loading
     )
@@ -982,12 +1037,12 @@ if __name__ == "__main__":
             print(f"{prefix}{type(x)} # not a Tensor or list/tuple")
 
     # Iterate through the first batch of the validation dataloader to inspect its structure and time loading.
-    for i, (context, future) in enumerate(data_module.val_dataloader()):
+    for i, (context) in enumerate(data_module.val_dataloader()):
         print(f"Batch {i}:")
         print("  Context (Input to Model):")
         print_structure(context, indent=4) # Use 4 spaces for better readability
-        print("  Future (Target for Model):")
-        print_structure(future, indent=4)
+        # print("  Future (Target for Model):")
+        # print_structure(future, indent=4)
         if i == 0: # Only print for the first batch
             elapsed = time.time() - start
             print(f"\nTime to load first validation batch: {elapsed:.3f} seconds")

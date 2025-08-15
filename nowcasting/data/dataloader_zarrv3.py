@@ -284,7 +284,12 @@ class NowcastingDataset(Dataset):
 
         # Handle temporal resampling
         _, inverse_indices = np.unique(time_range, return_inverse=True)
-        return data[inverse_indices]
+
+        harmonie_timestamps = None
+        if group == 'harmonie':
+            harmonie_timestamps = time_range
+
+        return data[inverse_indices], harmonie_timestamps
     
     def _ensure_channel_dim(self, data: np.ndarray) -> np.ndarray:
         """Ensure data has channel dimension: (T,H,W) -> (1,T,H,W)."""
@@ -311,7 +316,7 @@ class NowcastingDataset(Dataset):
         return np.stack([lat_broadcast, lon_broadcast], axis=0)
     
     def _load_context_data(self, t0: int, t1: int, spatial_slices: list[tuple],
-                           full_data_cache: dict, crop_data) -> any:
+                           full_data_cache: dict, crop_data, harmonie_timestamps) -> any:
         """Load and format context (input) data."""
         in_vars = self.info.get('in_vars', [])
         if not in_vars:
@@ -320,7 +325,10 @@ class NowcastingDataset(Dataset):
         # Generate timestamps if needed
         context_timesteps = None
         if self.include_timestamps:
-            context_timesteps = np.arange(-self.context_len + 1, 1, dtype=np.float32)
+            if harmonie_timestamps is not None:
+                context_timesteps = harmonie_timestamps.astype(np.float32)
+            else:
+                context_timesteps = np.arange(-self.context_len + 1, 1, dtype=np.float32)
 
         if self.nested_input:
             return self._load_nested_context(in_vars, t0, t1, spatial_slices,
@@ -348,7 +356,9 @@ class NowcastingDataset(Dataset):
                     group_data_list.append(context_part)
                 else:
                     # Load context portion only
-                    data = self._load_variable_data(var, t0, t1, spatial_slice)
+                    data, timestamps = self._load_variable_data(var, t0, t1, spatial_slice)
+                    if 'harmonie' in var:
+                        context_timesteps = timestamps.astype(np.float32)
                     data = self._ensure_channel_dim(data)
                     group_data_list.append(data)
             
@@ -389,7 +399,7 @@ class NowcastingDataset(Dataset):
                 context_data_list.append(context_part)
             else:
                 # Load context portion only
-                data = self._load_variable_data(var, t0, t1, spatial_slice)
+                data, _ = self._load_variable_data(var, t0, t1, spatial_slice)
                 data = self._ensure_channel_dim(data)
                 context_data_list.append(data)
         
@@ -418,7 +428,7 @@ class NowcastingDataset(Dataset):
                 future_data_list.append(forecast_part)
             else:
                 # Load forecast portion only
-                data = self._load_variable_data(var, t1, t2, spatial_slice)
+                data, _ = self._load_variable_data(var, t1, t2, spatial_slice)
                 data = self._ensure_channel_dim(data)
                 future_data_list.append(data)
         
@@ -448,10 +458,12 @@ class NowcastingDataset(Dataset):
         full_data_cache = {}
         for var in self.overlapping_vars:
             group_idx = self.in_var_to_group[var]
-            full_data_cache[var] = self._load_variable_data(var, t0, t2, spatial_slices[group_idx])
+            full_data_cache[var], timestamps = self._load_variable_data(var, t0, t2, spatial_slices[group_idx])
+            if 'harmonie' in var:
+                harmonie_timestamps = timestamps
 
         # Load context and future data using optimized strategy
-        context = self._load_context_data(t0, t1, spatial_slices, full_data_cache, crop_data)
+        context = self._load_context_data(t0, t1, spatial_slices, full_data_cache, crop_data, harmonie_timestamps)
         future = self._load_future_data(t1, t2, spatial_slices[0], full_data_cache)
 
         # Return appropriate format

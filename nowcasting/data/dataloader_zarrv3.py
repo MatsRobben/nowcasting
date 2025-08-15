@@ -456,6 +456,7 @@ class NowcastingDataset(Dataset):
 
         # Load overlapping variables once with full temporal range
         full_data_cache = {}
+        harmonie_timestamps = None
         for var in self.overlapping_vars:
             group_idx = self.in_var_to_group[var]
             full_data_cache[var], timestamps = self._load_variable_data(var, t0, t2, spatial_slices[group_idx])
@@ -917,7 +918,7 @@ if __name__ == "__main__":
         "latlon": False,
         "harmonie_forecasts": True,
         "in_vars": [
-            "harmonie/PRES_GDS0_GPML",  # Presure
+            ["harmonie/PRES_GDS0_GPML",  # Presure
             "harmonie/TMP_GDS0_HTGL",  # Temperature
             "harmonie/DPT_GDS0_HTGL",  # Dew point Temperature
             "harmonie/U_GRD_GDS0_HTGL",  # U component of wind
@@ -925,7 +926,7 @@ if __name__ == "__main__":
             "harmonie/R_H_GDS0_HTGL",  # Relative Humitaty
             "harmonie/A_PCP_GDS0_HTGL_acc",  # Total Precipitaiton
             "harmonie/T_CDC_GDS0_HTGL",  # Total cloud cover
-            "harmonie/KNMI_var_201_entatm",  # Graupel (Entire atmosphere)
+            "harmonie/KNMI_var_201_entatm"]  # Graupel (Entire atmosphere)
         ],
         "transforms": {
             "harmonie/PRES_GDS0_GPML": {
@@ -1005,7 +1006,7 @@ if __name__ == "__main__":
         split_info=split_info,
         context_len=4,       # 4 time steps for input
         forecast_len=0,     # 18 time steps for output
-        # include_timestamps=True, # Include relative timestamps in context
+        include_timestamps=True, # Include relative timestamps in context
         # use_crop=[True],
         img_size=(8,8),      # Spatial patch size: 8 blocks x 8 blocks
         stride=(4,1,1),      # Sample generation stride (t, h, w)
@@ -1040,6 +1041,7 @@ if __name__ == "__main__":
     for i, (context) in enumerate(data_module.val_dataloader()):
         print(f"Batch {i}:")
         print("  Context (Input to Model):")
+        print(context[0][1])
         print_structure(context, indent=4) # Use 4 spaces for better readability
         # print("  Future (Target for Model):")
         # print_structure(future, indent=4)

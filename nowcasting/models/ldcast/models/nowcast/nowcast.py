@@ -3,6 +3,7 @@ import collections
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib
+from omegaconf import ListConfig
 
 import torch
 from torch import nn
@@ -130,6 +131,7 @@ class AFNONowcastNetBase(nn.Module):
         analysis_depth=4,
         forecast_depth=4,
         per_input_forecast_depth=0,
+        use_crop=False,
         input_patches=(1,),
         input_size_ratios=(1,),
         output_patches=2,
@@ -147,12 +149,17 @@ class AFNONowcastNetBase(nn.Module):
         num_inputs = len(autoencoder)
         if not isinstance(embed_dim, collections.abc.Sequence):
             embed_dim = [embed_dim] * num_inputs
+        if isinstance(embed_dim, ListConfig):
+            embed_dim = list(embed_dim) 
         if embed_dim_out is None:
             embed_dim_out = embed_dim[0]
         if not isinstance(analysis_depth, collections.abc.Sequence):
             analysis_depth = [analysis_depth] * num_inputs
         if not isinstance(per_input_forecast_depth, collections.abc.Sequence):
             per_input_forecast_depth = [per_input_forecast_depth] * num_inputs
+        if not isinstance(use_crop, collections.abc.Sequence):
+            use_crop = [use_crop] * num_inputs
+        self.use_crop = use_crop
         self.embed_dim = embed_dim
         self.embed_dim_out = embed_dim_out
         self.output_patches = output_patches
@@ -212,12 +219,51 @@ class AFNONowcastNetBase(nn.Module):
         pos_enc = positional_encoding(t, x.shape[-1], add_dims=(2,3))
         return x + pos_enc
 
+    def _apply_crop(self, x: torch.Tensor, crops: torch.Tensor, channels_last: bool = False):
+        """
+        Apply a unique crop to each tensor in a batch.
+
+        Args:
+            x (torch.Tensor): The input tensor.
+                Shape: (B, C, T, H, W) if channels_last is False.
+                Shape: (B, T, H, W, C) if channels_last is True.
+            crops (torch.Tensor): A tensor of shape (B, 4), where each row is a crop
+                                in the format (h_start, w_start, h_size, w_size).
+            channels_last (bool): If True, assumes channels are the last dimension.
+        """
+        if crops is None:
+            return x
+
+        B = x.shape[0]
+        cropped_tensors = []
+
+        for i in range(B):
+            h0, w0, h_size, w_size = [int(val.item()) for val in crops[i]]
+
+            if channels_last:
+                # Crop for (B, T, H, W, C)
+                cropped_item = x[i:i+1, :, h0:h0+h_size, w0:w0+w_size, :]
+            else:
+                # Crop for (B, C, T, H, W)
+                cropped_item = x[i:i+1, :, :, h0:h0+h_size, w0:w0+w_size]
+            
+            cropped_tensors.append(cropped_item)
+
+        return torch.cat(cropped_tensors, dim=0)
+
     def forward(self, x):
-        (x, t_relative) = list(zip(*x))
+        x_data = []
+        t_relative = []
+        crop_info = []
+        
+        for group in x:
+            x_data.append(group[0])
+            t_relative.append(group[1] if len(group) > 1 else None)
+            crop_info.append(group[2] if len(group) > 2 else None)
 
         # encoding + analysis for each input
         def process_input(i):
-            z = self.autoencoder[i].encode(x[i])[0]
+            z = self.autoencoder[i].encode(x_data[i])[0]
             z = self.proj[i](z)
             z = z.permute(0,2,3,4,1)
             z = self.analysis[i](z)
@@ -236,6 +282,11 @@ class AFNONowcastNetBase(nn.Module):
                 z = self.temporal_transformer[i](pe_out, z)
 
             z = self.per_input_forecast[i](z)
+
+            # Apply crop at the very end if specified for this group
+            if self.use_crop[i]:
+                z = self._apply_crop(z, crop_info[i], channels_last=True)
+
             return z
 
         x = [process_input(i) for i in range(len(x))]
@@ -458,7 +509,7 @@ class AFNONowcastModule(L.LightningModule):
         log_params = {"on_step": False, "on_epoch": True, "prog_bar": True, "sync_dist": True}
         self.log(f"{split}/loss", loss, **log_params)
 
-        if batch_idx == 18 and self.global_rank == 0:
+        if batch_idx == 120 and self.global_rank == 0:
             # Detach and move to CPU to avoid memory issues
             input_img = x[0].permute(1, 0, 2, 3).detach().cpu()
             target_img = y[0].permute(1, 0, 2, 3).detach().cpu()

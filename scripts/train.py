@@ -199,22 +199,43 @@ def setup_model(config: OmegaConf):
     """
     Initializes a PyTorch Lightning model.
 
-    The model class path is expected under `config.model.module_path`.
-    The entire `config` object (after popping `module_path`) is passed to the
-    model's constructor.
-
-    Parameters:
-        config : OmegaConf
-            The full OmegaConf configuration object. The model-specific parameters
-            are expected under `config.model`.
-
-    Returns:
-        torch.nn.Module
-            An instantiated PyTorch Lightning model.
+    If a checkpoint path is provided, only the model weights are loaded
+    (without restoring trainer/optimizer state).
+    Optionally compiles the model if 'compile' is set in the config.
     """
     print(f"Setting up model from: {config.model.module_path}")
-    Model = load_module(config.model.pop('module_path'))
-    model = Model(config)
+    Model = load_module(config.model.pop("module_path"))
+
+    # Pop flags from config
+    compile_model = config.model.pop("compile", False)
+    checkpoint_path = config.model.pop("checkpoint_path", None)
+    initial_weights = config.model.pop("initial_weights", None)
+
+    if checkpoint_path:
+        print(f"Loading model weights from checkpoint: {checkpoint_path}")
+        model = Model.load_from_checkpoint(checkpoint_path, config=config)
+    else:
+        model = Model(config)
+
+    if initial_weights is not None:
+            print(f"Loading weights from {initial_weights}...")
+
+            weights = torch.load(initial_weights, map_location=model.device)
+
+            filtered_weights = {
+                k: v for k, v in weights.items()
+                if not (k.startswith("autoencoder.") or k.startswith("context_encoder.autoencoder."))
+            }
+
+            model.load_state_dict(
+                filtered_weights,
+                strict=False
+            )
+
+    if compile_model:
+        print("Compiling model with torch.compile...")
+        model = torch.compile(model, mode="default")
+
     print("Model setup complete.")
     return model
 
@@ -307,25 +328,18 @@ def main(config: Optional[str] = None, version_path: Optional[str] = None, **kwa
     resume_checkpoint = None
     logger = None
     if version_path:
-        # Resume from a previous versi
+        # True resume
         config, logger, resume_checkpoint = load_version(version_path)
-
-        # Ensure checkpoint_path from config is removed as resume_checkpoint handles it
-        config.model.pop("checkpoint_path") # remove from config
+        config.model.pop("checkpoint_path", None)
+        model = setup_model(config)  # fresh init, trainer restores
     else:
-        # Start a new training run or continue without a specific version path
         config_path = config
         config = OmegaConf.load(config) if (config is not None) else {}
         config.update(kwargs)
-
-        # Get checkpoint path if specified in the new config, then remove it
-        resume_checkpoint = config.model.pop("checkpoint_path", None)
+        
+        model = setup_model(config)
 
     data_module = setup_data(config.dataloader)
-
-    # Check if model compilation (for PyTorch 2.0+) is enabled in config
-    compile_model = config.model.pop("compile", False)
-    model = setup_model(config)
 
     trainer = setup_trainer(
                             config.trainer, 
@@ -347,11 +361,6 @@ def main(config: Optional[str] = None, version_path: Optional[str] = None, **kwa
             allow_multiple_runs=True,
         )
     tracker.start()
-
-    if compile_model:
-        print("Compiling model with torch.compile...")
-        model = torch.compile(model, mode="default")
-
     print("Initiating model training...")
     trainer.fit(model, data_module, ckpt_path=resume_checkpoint)
     print("Model training finished.")

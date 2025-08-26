@@ -7,7 +7,8 @@ from typing import List, Dict, Any, Optional
 from fire import Fire
 from omegaconf import OmegaConf
 
-from nowcasting.validation.metrics import Evaluator
+from nowcasting.validation.validation import PrecipitationEvaluator
+from nowcasting.validation.plots.plot_forecasts import ForecastCollector, extract_data_info_from_config
 
 def load_module(path: str):
     """
@@ -50,8 +51,10 @@ def load_module(path: str):
 def evaluation(
     model,
     dataloader: torch.utils.data.DataLoader,
+    config,
     model_name: str = "pysteps",
-    eval_name: str = "val",
+    save_dir: str = "./results",
+    eval_subdir: str = "evaluations",
     num_samples: Optional[int] = None,
     leadtimes: List[int] = [5, 10, 15, 30, 60, 90],
     thresholds: List[float] = [0, 0.5, 1, 2, 5, 10, 30],
@@ -91,50 +94,51 @@ def evaluation(
         num_batches = float('inf')
     else:
         num_batches = num_samples // dataloader.batch_size
-    
-    evaluator = Evaluator(
+
+    evaluator = PrecipitationEvaluator(
         nowcast_method=model_name,
-        dir=eval_name,
+        # metrics_to_compute=['pod', 'far', 'csi', 'bias','mse', 'mae', 'rmse', 'bias_score', 'correlation','fss'],
+        save_dir=save_dir,
+        eval_subdir=eval_subdir,
         thresholds=thresholds,
         leadtimes=leadtimes,
-        save_after_n_samples=dataloader.batch_size # Save scores after processing each batch
+        crop_size=(64,64),
+        save_frequency=100,
+        compute_crps = False,
+        # device=getattr(model, 'device', 'cpu')
     )
 
-    for idx, (x,y) in tqdm(enumerate(dataloader), desc="Verifying batches"):
+    data_info = extract_data_info_from_config(config)
+    collector = ForecastCollector(
+        save_dir=save_dir,
+        model_name=model_name,
+        intensity_threshold=0.8,
+        data_info=data_info,
+        max_samples=100,
+        save_ensemble=False,  # Save ensemble mean
+        eval_subdir=eval_subdir
+    )
+
+    for idx, (x,y,sample_idx) in tqdm(enumerate(dataloader), desc="Verifying batches"):
         # Pass input (x) and target (y) through the model to get the forecast (y_hat).
         # The model's __call__ method is expected to return (y_target, y_predicted).
         # This is done to preform the same post-processing on y and y_hat.
         y, y_hat = model(x, y)
 
-        # Handle ensemble dimension for models like DGMR UK which might output
-        # forecasts as (Batch, Time, Channel, Height, Width, Ensemble_Size).
-        if len(y_hat.shape) == 6:
-            y_hat = np.mean(y_hat, axis=-1)
-        
-        # Convert PyTorch tensors to NumPy arrays if necessary for compatibility with Evaluator.
-        if isinstance(y_hat, torch.Tensor): y_hat = y_hat.detach().numpy()
-        if isinstance(y, torch.Tensor): y = y.detach().numpy()
-
-        for y_target, y_pred in zip(y, y_hat):
-            for i, leadtime in enumerate(leadtimes):
-                # Extract the target and forecast radar images for the current leadtime.
-                # The `leadtime//5 - 1` indexing assumes leadtimes are multiples of 5
-                # and correspond to 0-indexed time steps (e.g., 5min -> index 0, 10min -> index 1).
-                R_target = np.squeeze(y_target)[leadtime//5-1]
-                R_forecast = np.squeeze(y_pred)[leadtime//5-1]
-                
-                evaluator.verify(R_target, R_forecast, leadtime=leadtime)
+        evaluator.process_batch(y, y_hat)
+        collector.process_batch(y, y_hat, sample_idx=sample_idx)
 
         if idx >= num_batches:
             break
 
+    evaluator.save_results("final_results")
+    collector.finalize()
+
     # After iterating through all batches, retrieve the final computed scores.
-    cat_scores, cont_scores, fss_scores = evaluator.get_scores()
-    print("\n--- Evaluation Results ---")
-    print("Categorical scores:", cat_scores)
-    print("Continuous scores:", cont_scores)
-    print("Fss scores:", fss_scores)
-    print("Evaluation completed.")
+    scores = evaluator.get_final_scores()
+    print(f"\nGenerated {len(scores)} metric categories")
+    for metric_type, data in scores.items():
+        print(f"  {metric_type}: {len(data) if data else 0} entries")
 
 def setup_dataloader(
     module_path: str = "nowcasting.data.dataloader.RadarDataModule",
@@ -166,7 +170,7 @@ def setup_dataloader(
     )
     data_module.setup()
     print("Dataloader setup complete.")
-    return data_module.val_dataloader()
+    return data_module.test_dataloader()
 
 def setup_model(
     module_path: str,
@@ -236,7 +240,7 @@ def main(config: Optional[str] = None, **kwargs):
         config=config
     )
     
-    evaluation(model, dataloader, **config.eval)
+    evaluation(model, dataloader, config, **config.eval)
 
     print("Main evaluation process finished.")
 

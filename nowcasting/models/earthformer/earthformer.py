@@ -32,10 +32,10 @@ class CuboidSEVIRPLModule(L.LightningModule):
     It is designed as an extension to the EarthFormer codebase, adapting the
     Cuboid Transformer for specific meteorological forecasting applications.
     """
-    def __init__(self, cfg):
+    def __init__(self, config):
         super(CuboidSEVIRPLModule, self).__init__()
 
-        self.config = cfg
+        self.config = config
     
         self.torch_nn_module = CuboidTransformerModel(
             input_shape=self.config.model.pop('input_shape'),
@@ -170,7 +170,7 @@ class CuboidSEVIRPLModule(L.LightningModule):
                 logger=True,
                 sync_dist=True)
 
-        if batch_idx == 636 and self.global_rank == 0:
+        if batch_idx == 127 and self.global_rank == 0:
             # Detach and move to CPU to avoid memory issues
             input_img = x[0].permute(0, 3, 1, 2).detach().cpu()
             target_img = y[0].permute(0, 3, 1, 2).detach().cpu()

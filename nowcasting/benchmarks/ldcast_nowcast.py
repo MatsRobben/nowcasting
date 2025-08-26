@@ -3,7 +3,6 @@ import numpy as np
 from typing import Union, Tuple
 
 from nowcasting.models.ldcast.models.nowcast.nowcast import AFNONowcastModule
-from nowcasting.utils import data_prep
 
 class LDCastNowcastNet:
     """
@@ -67,6 +66,50 @@ class LDCastNowcastNet:
         elif isinstance(x, (list, tuple)):
             return type(x)(self._move_to_device(v, device) for v in x)
 
+    def to_mmh(self, img, norm_method='zscore', mean=0.03019706713265408, std=0.5392297631902654):
+        """
+        Convert normalized precipitation data to mm/h.
+
+        Parameters:
+            img (np.ndarray or torch.Tensor): Normalized input data.
+            norm_method (str): 'zscore' or 'minmax'.
+            mean (float): Mean for z-score normalization.
+            std (float): Std for z-score normalization.
+
+        Returns:
+            img_mmh: Precipitation in mm/h (clipped to [0, 160]).
+        """
+        if norm_method == 'zscore':
+            img = img * std + mean
+            img_mmh = 10 ** img
+
+        elif norm_method == 'minmax':
+            # Undo minmax normalization to [0, 55] dBZ
+            img = img * 55
+
+            # Convert from dBZ to mm/h (in-place)
+            if isinstance(img, np.ndarray):
+                mask = img != 0
+                img[mask] = ((10**(img[mask] / 10) - 1) / 200) ** (5 / 8)
+            elif isinstance(img, torch.Tensor):
+                mask = img != 0
+                img[mask] = ((10**(img[mask] / 10) - 1) / 200) ** (5 / 8)
+            else:
+                raise TypeError("Input must be a numpy array or a torch tensor")
+
+            img_mmh = img
+
+        else:
+            raise ValueError("norm_method must be 'zscore' or 'minmax'")
+
+        # Clip final mm/h values to physical range
+        if isinstance(img_mmh, torch.Tensor):
+            img_mmh = torch.clamp(img_mmh, 0.0, 160.0)
+        elif isinstance(img_mmh, np.ndarray):
+            img_mmh = np.clip(img_mmh, 0.0, 160.0)
+
+        return img_mmh
+
     def __call__(self, x: Union[torch.Tensor, list, tuple], y: torch.Tensor) -> Tuple[np.ndarray, np.ndarray]:
         """
         Performs a forward pass (inference) with the LDCast nowcasting model.
@@ -90,15 +133,14 @@ class LDCastNowcastNet:
         """
 
         x = self._move_to_device(x, self.device)
+        y = y.to(self.device)
 
         with torch.no_grad():
             y_hat = self.model(x)
 
-        y_hat = y_hat.detach().cpu().numpy()
-
         # Convert dBz to mm/h for evaluation.
-        data_prep(y_hat, convert_to_dbz=True, undo=True)
-        data_prep(y, convert_to_dbz=True, undo=True)
+        y_hat = self.to_mmh(y_hat)
+        y = self.to_mmh(y)
 
         # Warning: this is hardcoded! LDCast has to predict in multiple of 4, so it was trained
         # to predict 20 frames, however, the other models only produce 18 fames.

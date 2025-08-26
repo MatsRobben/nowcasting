@@ -119,17 +119,19 @@ class EarthformerModel:
         x = x.permute(0, 2, 3, 4, 1)
 
         x = x.to(self.device)
+        y = y.to(self.device)
 
         with torch.no_grad():
             y_hat = self.model(x)
 
-        # Earthformer Shape (B, T, W, H, C) -> (B, C, T, W, H)
-        y_hat = y_hat.permute(0, 4, 1, 2, 3)
+            # Earthformer Shape (B, T, W, H, C) -> (B, C, T, W, H)
+            y_hat = y_hat.permute(0, 4, 1, 2, 3)
 
-        y_hat = y_hat.detach().cpu().numpy()
+            y_hat = y_hat[:, 0:1, ...]
+            y = y[:, 0:1, ...]
 
-        # Convert dBz to mm/h for evaluation.
-        y_hat = self.to_mmh(y_hat)
-        y = self.to_mmh(y)
+            # Convert dBz to mm/h for evaluation.
+            y_hat = self.to_mmh(y_hat)
+            y = self.to_mmh(y)
 
         return y, y_hat

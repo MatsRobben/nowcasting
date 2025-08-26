@@ -22,7 +22,7 @@ class DGMRModel:
       (Specifically, inspired by or derived from `eval_dgmr.py` in that project)
     """
     def __init__(
-        self, 
+        self, config: dict,
         model_handle: str = "./models/dgmr_uk/256x256",
         future_timesteps: int = 18,
         multi_gpu: bool = True,
@@ -53,10 +53,14 @@ class DGMRModel:
                 If True, applies a calibration factor (multiplies latent noise 'z' by 2.0).
                 This might be used to adjust the spread of the ensemble forecasts.
         """
-        self.future_timesteps = future_timesteps
-        self.transform_to_rainrate = transform_to_rainrate
-        self.transform_from_rainrate = transform_from_rainrate
-        self.calibrated = calibrated
+        model_handle = config.model.get("model_handle", "./models/dgmr_uk/256x256")
+        self.future_timesteps = config.model.get("future_timesteps", 18)
+        multi_gpu = config.model.get("multi_gpu", True)
+        self.calibrated = config.model.get("calibrated", False)
+
+        # These may be None or actual callables injected via config
+        self.transform_to_rainrate = config.model.get("transform_to_rainrate", None)
+        self.transform_from_rainrate = config.model.get("transform_from_rainrate", None)
 
         if multi_gpu and len(tf.config.list_physical_devices('GPU')) > 1:
             # initialize multi-GPU strategy
@@ -99,9 +103,8 @@ class DGMRModel:
                 Note: This `__call__` method generates a single forecast. For ensembles,
                 `create_ensemble` function should be used to call this multiple times.
         """       
-        while isinstance(x, list) or isinstance(x, tuple):
-            x = x[0]
-        x = np.asarray(x)
+        x = x.detach().numpy()
+        y = y.detach().numpy()
 
         # Shape (B, C, T, W, H) -> Shape (B, T, W, H, C)
         x = x.transpose(0, 2, 3, 4, 1)
@@ -132,7 +135,6 @@ class DGMRModel:
 
         if self.transform_from_rainrate is not None:
             y_hat = self.transform_from_rainrate(y_hat)
-
 
         return y, y_hat
 

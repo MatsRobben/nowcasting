@@ -1,0 +1,126 @@
+dataloader:
+  module_path: nowcasting.data.dataloader_zarrv3.NowcastingDataModule
+  path: "/projects/prjs1634/nowcasting/data/dataset.zarr"
+  var_info:
+    sample_var: "radar/max_intensity_grid"
+    latlon: false
+    harmonie_forecasts: true
+    in_vars:
+      - "harmonie/PRES_GDS0_GPML" # Presure
+      - "harmonie/TMP_GDS0_HTGL" # Temperature
+      - "harmonie/DPT_GDS0_HTGL" # Dew point Temperature
+      - "harmonie/U_GRD_GDS0_HTGL" # U component of wind
+      - "harmonie/V_GRD_GDS0_HTGL" # V component of wind
+      - "harmonie/R_H_GDS0_HTGL" # Relative Humitaty
+      - "harmonie/A_PCP_GDS0_HTGL_acc" # Total Precipitaiton 
+      - "harmonie/T_CDC_GDS0_HTGL" # Total cloud cover
+      - "harmonie/KNMI_var_201_entatm" # Graupel (Entire atmosphere)
+    transforms: 
+      harmonie/PRES_GDS0_GPML:
+        normalize: {mean: 101561.22319815714, std: 1086.8065468683621}
+      harmonie/DPT_GDS0_HTGL:
+        normalize: {mean: 280.02349829680645, std: 5.57281521209835}
+      harmonie/R_H_GDS0_HTGL:
+        normalize: {mean: 0.8194103129556326, std: 0.14297640025250816}
+      harmonie/A_PCP_GDS0_HTGL_acc:
+        normalize: {mean: 0.09991637987204555, std: 0.45573451345607613}
+      harmonie/T_CDC_GDS0_HTGL:
+        normalize: {mean: 0.7056532355251186, std: 0.4124938691551687}
+      harmonie/KNMI_var_201_entatm:
+        normalize: {mean: 0.01663923929552923, std: 0.1512492953711808}
+      harmonie/TMP_GDS0_HTGL:
+        normalize: {mean: 282.99435754062006, std: 6.236862884872817}
+      harmonie/U_GRD_GDS0_HTGL:
+        normalize: {mean: 2.067854756241567, std: 6.07311070186992}
+      harmonie/V_GRD_GDS0_HTGL:
+        normalize: {mean: 1.2600543556072512, std: 6.145160154787648}
+
+  split_info:
+    split_rules:
+      test:
+        year: 
+        - 2023
+      val:
+        month:
+          - 6
+          - 11
+      train: {}
+    apply_missing_masks:
+      - "radar"
+      - "harmonie"
+      - "sat_l2"
+      - "sat_l1p5"
+      - "aws_inter"
+    clutter_threshold: 50
+
+  sample_info:
+    threshold: 0.01
+    methods:
+      train:
+        agg: "mean_pool"
+      val:
+        agg: "mean_pool"
+        center_crop: true
+      test:
+        agg: "mean_pool"
+
+  context_len: 4
+  forecast_len: 0
+  img_size: [8, 8]
+  stride: [4,1,1]
+  batch_size: 16
+  num_workers: 24
+trainer:
+  max_epochs: 100
+  accelerator: "auto"
+  strategy: "auto"
+  precision: 32 #"16-mixed"
+  profiler: "simple"
+  limit_train_batches: 2000
+  # limit_val_batches: 20
+  accumulate_grad_batches: 1
+logger:
+  save_dir: "./results/tb_logs"
+  name: "ldcast_autoenc"
+callbacks:
+  checkpoint:
+    monitor: "val/rec_loss"
+    save_top_k: 3
+    save_last: true
+    mode: "min"
+  early_stopping:
+    monitor: "val/rec_loss"
+    min_delta: 0.0
+    patience: 6
+    verbose: true
+    mode: "min"
+optimizer:
+  lr: 1e-4
+  weight_decay: 1e-4
+  betas: [0.5, 0.9]
+  # scheduler
+  patience: 3
+  factor: 0.1
+  monitor: "val/rec_loss"
+loss:
+  crop_loss_weight: 0.0
+model:
+  module_path: nowcasting.models.ldcast.models.autoenc.autoenc.AutoencoderKL
+  checkpoint_path: null
+  compile: true
+
+  enc_params: 
+    in_dim: 9
+    levels: 2
+    min_ch: 128
+  dec_params:
+    in_dim: 9
+    levels: 2
+    min_ch: 128
+  kl_weight: 0.01
+  encoded_channels: 128
+  hidden_width: 128
+
+eval:
+  model_name: "earthformer"
+  num_samples: 32000

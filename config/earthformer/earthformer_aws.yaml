@@ -1,16 +1,50 @@
 dataloader:
   module_path: nowcasting.data.dataloader_zarrv3.NowcastingDataModule
-  path: "/vol/knmimo-nobackup/users/mrobben/nowcasting/data/dataset_regrid.zarr"
+  path: "/projects/prjs1634/nowcasting/data/dataset.zarr"
   var_info:
     sample_var: "radar/max_intensity_grid"
     in_vars:
       - "radar/rtcor"
-    out_vars:
+      - "aws/TOT_T_DRYB_10" # Dry bulb temp
+      - "aws/TOT_T_WETB_10" # Wet bulb temp
+      - "aws/TOT_T_DEWP_10" # Dew point temp
+      - "aws/TOW_FF_10M_10" # Wind speed
+      - "aws/TOW_DD_10" # Wind direction in 360 degrees
+      - "aws/TOA_P_STN_LEVEL_10" # Presure at station level
+      - "aws/TOS_Q_GLOB_10" # Average global radaiation
+    out_vars: 
       - "radar/rtcor"
     transforms: 
       radar: 
-        dbz_normalization:
-          convert_to_dbz: true
+        default_rainrate: {mean: 0.03019706713265408, std: 0.5392297631902654}
+      aws/TOT_T_DRYB_10:
+        normalize: {mean: 11.296092, std: 6.215682, aws: true}
+        aws_interpolation: 
+          target_shape: [768, 704]
+      aws/TOT_T_WETB_10:
+        normalize: {mean: 9.308311, std: 5.298550, aws: true}
+        aws_interpolation: 
+          target_shape: [768, 704]
+      aws/TOT_T_DEWP_10:
+        normalize: {mean: 7.640987, std: 5.469701, aws: true}
+        aws_interpolation: 
+          target_shape: [768, 704]
+      aws/TOW_FF_10M_10:
+        normalize: {mean: 5.469827, std: 3.584101, aws: true}
+        aws_interpolation: 
+          target_shape: [768, 704]
+      aws/TOW_DD_10:
+        normalize: {mean: 190.055984, std: 95.192940, aws: true}
+        aws_interpolation: 
+          target_shape: [768, 704]
+      aws/TOA_P_STN_LEVEL_10:
+        normalize: {mean: 1013.361145, std: 11.233006, aws: true}
+        aws_interpolation: 
+          target_shape: [768, 704]
+      aws/TOS_Q_GLOB_10:
+        normalize: {mean: 129.000137, std: 213.522766, aws: true}
+        aws_interpolation: 
+          target_shape: [768, 704]
 
   split_info:
     split_rules:
@@ -47,17 +81,16 @@ dataloader:
         center_crop: true
       test:
         agg: "mean_pool"
-
   context_len: 4
   forecast_len: 18
   img_size: [8, 8]
   stride: [1,1,1]
-  batch_size: 8
-  num_workers: 12
+  batch_size: 16
+  num_workers: 24
 trainer:
-  max_epochs: 500
+  max_epochs: 60
   accelerator: "auto"
-  strategy: "ddp_find_unused_parameters_true"
+  strategy: "auto" #"ddp_find_unused_parameters_true"
   precision: "16-mixed"
   profiler: "simple"
   limit_train_batches: 1000
@@ -89,11 +122,20 @@ optimizer:
   min_lr_ratio: 1.0e-3
   warmup_min_lr_ratio: 0.0
   warmup_percentage: 0.2
-
+loss:
+  loss_name: "balanced"
+  normalization: "zscore"
+  mean_log_rain: 0.03019706713265408
+  std_log_rain: 0.5392297631902654
+  max_weight_r: 30
+  weight_intensity: 1.0
+  extended: true
 model:
   module_path: nowcasting.models.earthformer.earthformer.CuboidSEVIRPLModule
   checkpoint_path: null
-  input_shape: [4, 256, 256, 1]
+  compile: true
+
+  input_shape: [4, 256, 256, 8]
   target_shape: [18, 256, 256, 1]
   base_units: 128
   block_units: null

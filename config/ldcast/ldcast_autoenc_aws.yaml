@@ -1,0 +1,121 @@
+dataloader:
+  module_path: nowcasting.data.dataloader_zarrv3.NowcastingDataModule
+  path: "/projects/prjs1634/nowcasting/data/dataset.zarr"
+  var_info:
+    sample_var: "radar/max_intensity_grid"
+    latlon: false
+    in_vars:
+      - "aws_inter/TOT_T_DRYB_10" # Dry bulb temp
+      - "aws_inter/TOT_T_WETB_10" # Wet bulb temp
+      - "aws_inter/TOT_T_DEWP_10" # Dew point temp
+      - "aws_inter/TOW_FF_10M_10" # Wind speed
+      - "aws_inter/TOW_DD_10" # Wind direction in 360 degrees
+      - "aws_inter/TOA_P_STN_LEVEL_10" # Presure at station level
+      - "aws_inter/TOS_Q_GLOB_10" # Average global radaiation
+    transforms: 
+      aws_inter/TOT_T_DRYB_10:
+        normalize: {mean: 11.296092, std: 6.215682}
+      aws_inter/TOT_T_WETB_10:
+        normalize: {mean: 9.308311, std: 5.298550}
+      aws_inter/TOT_T_DEWP_10:
+        normalize: {mean: 7.640987, std: 5.469701}
+      aws_inter/TOW_FF_10M_10:
+        normalize: {mean: 5.469827, std: 3.584101}
+      aws_inter/TOW_DD_10:
+        normalize: {mean: 190.055984, std: 95.192940}
+      aws_inter/TOA_P_STN_LEVEL_10:
+        normalize: {mean: 1013.361145, std: 11.233006}
+      aws_inter/TOS_Q_GLOB_10:
+        normalize: {mean: 129.000137, std: 213.522766}
+
+  split_info:
+    split_rules:
+      test:
+        year: 
+        - 2023
+      val:
+        month:
+          - 6
+          - 11
+      train: {}
+    apply_missing_masks:
+      - "radar"
+      - "harmonie"
+      - "sat_l2"
+      - "sat_l1p5"
+      - "aws_inter"
+    clutter_threshold: 50
+
+  sample_info:
+    threshold: 0.01
+    methods:
+      train:
+        agg: "mean_pool"
+      val:
+        agg: "mean_pool"
+        center_crop: true
+      test:
+        agg: "mean_pool"
+
+  context_len: 8
+  forecast_len: 0
+  img_size: [24, 22]
+  stride: [1,1,1]
+  batch_size: 16
+  num_workers: 24
+trainer:
+  max_epochs: 100
+  accelerator: "auto"
+  strategy: "auto"
+  precision: 32 #"16-mixed"
+  profiler: "simple"
+  limit_train_batches: 2000
+  # limit_val_batches: 20
+  accumulate_grad_batches: 1
+logger:
+  save_dir: "./results/tb_logs"
+  name: "ldcast_autoenc"
+callbacks:
+  checkpoint:
+    monitor: "val/rec_loss"
+    save_top_k: 3
+    save_last: true
+    mode: "min"
+  early_stopping:
+    monitor: "val/rec_loss"
+    min_delta: 0.0
+    patience: 6
+    verbose: true
+    mode: "min"
+optimizer:
+  lr: 1e-4
+  weight_decay: 1e-4
+  betas: [0.5, 0.9]
+  # scheduler
+  patience: 3
+  factor: 0.1
+  monitor: "val/rec_loss"
+loss:
+  crop_loss_weight: 0.3
+  latent_crop_size: 4
+  pixel_per_latent: 4
+model:
+  module_path: nowcasting.models.ldcast.models.autoenc.autoenc.AutoencoderKL
+  checkpoint_path: null
+  compile: true
+
+  enc_params: 
+    in_dim: 7
+    levels: 2
+    min_ch: 128
+  dec_params:
+    in_dim: 7
+    levels: 2
+    min_ch: 128
+  kl_weight: 0.01
+  encoded_channels: 128
+  hidden_width: 128
+
+eval:
+  model_name: "earthformer"
+  num_samples: 32000

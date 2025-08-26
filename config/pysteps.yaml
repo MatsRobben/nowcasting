@@ -1,6 +1,6 @@
 dataloader:
   module_path: nowcasting.data.dataloader_zarrv3.NowcastingDataModule
-  path: "/vol/knmimo-nobackup/users/mrobben/nowcasting/data/dataset_regrid.zarr"
+  path: "/projects/prjs1634/nowcasting/data/dataset.zarr"
   var_info:
     sample_var: "radar/max_intensity_grid"
     in_vars:
@@ -24,8 +24,9 @@ dataloader:
       - "harmonie"
       - "sat_l2"
       - "sat_l1p5"
-      - "aws"
+      - "aws_inter"
     clutter_threshold: 50
+    convection_mask: true
 
   sample_info:
     threshold: 0.01
@@ -37,13 +38,15 @@ dataloader:
         center_crop: true
       test:
         agg: "mean_pool"
+        center_crop: true
 
   context_len: 4
   forecast_len: 18
   img_size: [8, 8]
-  stride: [1,1,1]
+  stride: [4,1,1]
+  return_index: true
   batch_size: 32
-  num_workers: 24
+  num_workers: 18
 model:
   module_path: nowcasting.benchmarks.pysteps.PySTEPSModel
   ensemble_size: 1
@@ -52,6 +55,7 @@ model:
 eval:
   model_path: nowcasting.benchmarks.pysteps.PySTEPSModel
   model_name: "pysteps"
-  eval_name: "val"
+  save_dir: "/projects/prjs1634/nowcasting/results/scores"
+  eval_subdir: "convective_events"
   leadtimes: [5,10,15,30,60,90]
   thresholds: [0.5, 1, 2, 5, 10, 20, 30]

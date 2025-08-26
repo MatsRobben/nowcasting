@@ -35,26 +35,28 @@ dataloader:
         agg: "mean_pool"
       val:
         agg: "mean_pool"
-        center_crop: true
+        # center_crop: true
       test:
         agg: "mean_pool"
-        center_crop: true
+        # center_crop: true
 
   context_len: 4
   forecast_len: 18
-  img_size: [8, 8]
+  img_size: [24, 22]
   stride: [4,1,1]
   return_index: true
-  batch_size: 32
+  batch_size: 8
   num_workers: 18
 model:
-  module_path: nowcasting.benchmarks.dgmr_uk.DGMRModel
-  model_handle: './models/dgmr_uk/256x256/'
+  module_path: nowcasting.benchmarks.pysteps.PySTEPSModel
+  method: "sprog"
   future_timesteps: 18
+  km_per_pixel: 1.0
 eval:
-  model_path: nowcasting.benchmarks.dgmr_uk.DGMRModel
-  model_name: "dgmr_uk"
+  model_path: nowcasting.benchmarks.pysteps.PySTEPSModel
+  model_name: "sprog"
   save_dir: "/projects/prjs1634/nowcasting/results/scores"
-  eval_subdir: "evaluations"
+  eval_subdir: "full_coverage"
   leadtimes: [5,10,15,30,60,90]
   thresholds: [0.5, 1, 2, 5, 10, 20, 30]
+  num_samples: 100

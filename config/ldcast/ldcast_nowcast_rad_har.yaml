@@ -1,0 +1,185 @@
+dataloader:
+  module_path: nowcasting.data.dataloader_zarrv3.NowcastingDataModule
+  path: "/projects/prjs1634/nowcasting/data/dataset.zarr"
+  var_info:
+    sample_var: "radar/max_intensity_grid"
+    latlon: false
+    in_vars:
+      - ["radar/rtcor"]
+      - ["harmonie/PRES_GDS0_GPML", # Presure
+        "harmonie/TMP_GDS0_HTGL", # Temperature
+        "harmonie/DPT_GDS0_HTGL", # Dew point Temperature
+        "harmonie/U_GRD_GDS0_HTGL", # U component of wind
+        "harmonie/V_GRD_GDS0_HTGL", # V component of wind
+        "harmonie/R_H_GDS0_HTGL", # Relative Humitaty
+        "harmonie/A_PCP_GDS0_HTGL_acc", # Total Precipitaiton 
+        "harmonie/T_CDC_GDS0_HTGL", # Total cloud cover
+        "harmonie/KNMI_var_201_entatm"] # Graupel (Entire atmosphere)
+    out_vars:
+      - "radar/rtcor"
+    transforms:
+      radar: 
+        default_rainrate: {mean: 0.03019706713265408, std: 0.5392297631902654}
+
+      harmonie/PRES_GDS0_GPML:
+        normalize: {mean: 101561.22319815714, std: 1086.8065468683621}
+      harmonie/DPT_GDS0_HTGL:
+        normalize: {mean: 280.02349829680645, std: 5.57281521209835}
+      harmonie/R_H_GDS0_HTGL:
+        normalize: {mean: 0.8194103129556326, std: 0.14297640025250816}
+      harmonie/A_PCP_GDS0_HTGL_acc:
+        normalize: {mean: 0.09991637987204555, std: 0.45573451345607613}
+      harmonie/T_CDC_GDS0_HTGL:
+        normalize: {mean: 0.7056532355251186, std: 0.4124938691551687}
+      harmonie/KNMI_var_201_entatm:
+        normalize: {mean: 0.01663923929552923, std: 0.1512492953711808}
+      harmonie/TMP_GDS0_HTGL:
+        normalize: {mean: 282.99435754062006, std: 6.236862884872817}
+      harmonie/U_GRD_GDS0_HTGL:
+        normalize: {mean: 2.067854756241567, std: 6.07311070186992}
+      harmonie/V_GRD_GDS0_HTGL:
+        normalize: {mean: 1.2600543556072512, std: 6.145160154787648}
+
+  split_info:
+    split_rules:
+      test:
+        year: 
+        - 2023
+      val:
+        month:
+          - 6
+          - 11
+      train: {}
+    apply_missing_masks:
+      - "radar"
+      - "harmonie"
+      - "sat_l2"
+      - "sat_l1p5"
+      - "aws_inter"
+    clutter_threshold: 50
+
+  sample_info:
+    threshold: 0.01
+    methods:
+      train:
+        agg: "mean_pool"
+      val:
+        agg: "mean_pool"
+        center_crop: true
+      test:
+        agg: "mean_pool"
+
+  context_len: 4
+  forecast_len: 20
+  include_timestamps: true
+  img_size: [8, 8]
+  stride: [4,1,1]
+  batch_size: 8
+  num_workers: 16
+trainer:
+  max_epochs: 30
+  accelerator: "auto"
+  strategy: "auto"
+  precision: "16-mixed"
+  profiler: "simple"
+  limit_train_batches: 2000
+  limit_val_batches: 1000
+  gradient_clip_val: 1.0
+  gradient_clip_algorithm: "norm"
+  accumulate_grad_batches: 1
+logger:
+  save_dir: "./results/tb_logs"
+  name: "ldcast_nowcast"
+loss:
+  loss_name: "balanced"
+  normalization: "zscore"
+  mean_log_rain: 0.03019706713265408
+  std_log_rain: 0.5392297631902654
+  max_weight_r: 30
+  weight_intensity: 1.0
+  extended: true
+callbacks:
+  checkpoint:
+    monitor: "val/loss"
+    save_top_k: 3
+    save_last: true
+    mode: "min"
+  # early_stopping:
+  #   monitor: "val/loss"
+  #   min_delta: 0.0
+  #   patience: 6
+  #   verbose: true
+  #   mode: "min"
+optimizer:
+  lr: 1e-3
+  weight_decay: 1e-3
+  betas: [0.5, 0.9]
+  # scheduler
+  patience: 3
+  factor: 0.1
+  monitor: "val/loss"
+model:
+  module_path: nowcasting.models.ldcast.models.nowcast.nowcast.AFNONowcastModule
+  checkpoint_path: null
+  compile: true
+  
+  # Main model parameters
+  embed_dim: [128, 128]
+  analysis_depth: [4, 4]
+  forecast_depth: 4
+  input_patches: [1, 1]
+  input_size_ratios: [1, 2]
+  output_patches: 5
+  afno_fusion: false
+  use_forecast: true
+  per_input_forecast_depth: [0, 0]
+  
+  # Autoencoder configurations
+  input_autoencoders:
+    -  # Radar autoencoder config
+      model:
+        enc_params:
+          in_dim: 1
+          levels: 2
+          min_ch: 64
+        dec_params:
+           in_dim: 1
+           levels: 2
+           min_ch: 64
+        kl_weight: 0.01
+        encoder_channels: 64
+        hidden_width: 32
+    -  # Harmonie autoencoder config
+      model:
+        enc_params: 
+          in_dim: 9
+          levels: 2
+          min_ch: 128
+        dec_params:
+          in_dim: 9
+          levels: 2
+          min_ch: 128
+        kl_weight: 0.01
+        encoded_channels: 128
+        hidden_width: 128
+
+  # Autoencoder checkpoints
+  input_autoencoder_ckpts:
+    - "/projects/prjs1634/nowcasting/results/tb_logs/ldcast_autoenc/version_8/checkpoints/epoch=46-step=94000.ckpt"
+    - "/projects/prjs1634/nowcasting/results/tb_logs/ldcast_autoenc/version_9/checkpoints/epoch=65-step=132000.ckpt"
+
+  # Output autoencoder
+  # Default: take first input_autoencoder
+  
+  pretrained_paths:
+    - null
+    - null
+  freeze_pretrained: [false, false]  # Freeze satellite pipeline
+
+
+eval:
+  model_path: nowcasting.benchmarks.ldcast_nowcast.LDCastNowcastNet
+  model_name: "ldcast_nowcast"
+  eval_name: "val"
+  leadtimes: [5,10,15,30,60,90]
+  thresholds: [0.5, 1, 2, 5, 10, 20, 30]

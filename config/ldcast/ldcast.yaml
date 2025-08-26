@@ -1,0 +1,153 @@
+dataloader:
+  module_path: nowcasting.data.dataloader_zarrv3.NowcastingDataModule
+  path: "/projects/prjs1634/nowcasting/data/dataset.zarr"
+  var_info:
+    sample_var: "radar/max_intensity_grid"
+    latlon: false
+    in_vars:
+      - ["radar/rtcor"]
+    out_vars:
+      - "radar/rtcor"
+    transforms:
+      radar: 
+        default_rainrate: {mean: 0.03019706713265408, std: 0.5392297631902654}
+    
+  split_info:
+    split_rules:
+      test:
+        year: 
+        - 2023
+      val:
+        month:
+          - 6
+          - 11
+      train: {}
+    apply_missing_masks:
+      - "radar"
+      - "harmonie"
+      - "sat_l2"
+      - "sat_l1p5"
+      - "aws_inter"
+    clutter_threshold: 50
+
+  sample_info:
+    bins:
+      n_bins: 25
+      first_bin: 0.01
+      last_bin: 10.0
+      slope: 0.4
+      scaler: 5.1 # 255/50
+      n_samples: 256000
+    threshold: 0.01
+    methods:
+      train:
+        agg: "mean_pool"
+      val:
+        agg: "mean_pool"
+        center_crop: true
+      test:
+        agg: "mean_pool"
+
+  context_len: 4
+  forecast_len: 20
+  include_timestamps: true
+  img_size: [4, 4]
+  stride: [4,1,1]
+  batch_size: 8
+  num_workers: 16
+trainer:
+  max_epochs: 30
+  accelerator: "auto"
+  strategy: "auto"
+  precision: 32 #"16-mixed"
+  profiler: "simple"
+  limit_train_batches: 4000
+  # limit_val_batches: 
+  gradient_clip_val: 1.0
+  gradient_clip_algorithm: "norm"
+  accumulate_grad_batches: 1
+logger:
+  save_dir: "./results/tb_logs"
+  name: "ldcast"
+callbacks:
+  checkpoint:
+    monitor: "val/loss_ema"
+    save_top_k: 1
+    save_last: true
+    mode: "min"
+  early_stopping:
+    monitor: "val/loss_ema"
+    min_delta: 0.0
+    patience: 6
+    verbose: true
+    mode: "min"
+optimizer:
+  lr: 1e-4
+  weight_decay: 1e-3
+  betas: [0.5, 0.9]
+  # scheduler
+  patience: 3
+  factor: 0.25
+  monitor: "val/loss_ema"
+loss:
+  loss_name: "l2"
+model:
+  module_path: nowcasting.models.ldcast.models.diffusion.diffusion.LatentDiffusion
+  checkpoint_path: "/projects/prjs1634/nowcasting/results/tb_logs/ldcast/version_5/checkpoints/last-v1.ckpt"
+  compile: true
+
+  timesteps: 1000
+  beta_schedule: "linear"
+  use_ema: true
+  linear_start: 0.0001
+  linear_end: 0.02
+  cosine_s: 0.008
+  
+  # Validation
+  num_diffusion_iters: 50
+  ensemble_size: 1
+
+  autoencoders:
+    -  # Radar autoencoder config
+      model:
+        enc_params:
+          in_dim: 1
+          levels: 2
+          min_ch: 64
+        dec_params:
+           in_dim: 1
+           levels: 2
+           min_ch: 64
+        kl_weight: 0.01
+        encoder_channels: 64
+        hidden_width: 32
+
+  autoencoder_ckpts:
+    - "/projects/prjs1634/nowcasting/results/tb_logs/ldcast_autoenc/version_8/checkpoints/epoch=46-step=94000.ckpt"
+  
+  context_encoder:
+    embed_dim: [128]
+    analysis_depth: [4]
+    forecast_depth: 4
+    input_patches: [1]
+    input_size_ratios: [1]
+    output_patches: 5
+    cascade_depth: 3
+    train_autoenc: false
+    afno_fusion: false
+
+  model:
+    model_channels: 256
+    num_res_blocks: 2
+    attention_resolutions: [1, 2]
+    dims: 3
+    channel_mult: [1, 2, 4]
+    num_heads: 8
+    num_timesteps: 5
+
+eval:
+  model_path: nowcasting.benchmarks.ldcast.LDCast
+  model_name: "ldcast"
+  eval_name: "val"
+  leadtimes: [5,10,15,30,60,90]
+  thresholds: [0.5, 1, 2, 5, 10, 20, 30]

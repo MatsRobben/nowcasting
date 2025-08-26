@@ -1,20 +1,14 @@
 dataloader:
   module_path: nowcasting.data.dataloader_zarrv3.NowcastingDataModule
-  path: "/vol/knmimo-nobackup/users/mrobben/nowcasting/data/dataset_regrid.zarr"
+  path: "/projects/prjs1634/nowcasting/data/dataset.zarr"
   var_info:
     sample_var: "radar/max_intensity_grid"
     latlon: false
     in_vars:
-      - "sat_l1p5/WV_062"
-      - "sat_l1p5/IR_108"
-    transforms: 
-      sat_l1p5: 
-        resize:
-          scale: 2
-      sat_l1p5/WV_062:
-        normalize: {mean: 230.6474, std: 4.9752}
-      sat_l1p5/IR_108:
-        normalize: {mean: 266.7156, std: 16.5736}
+      - "radar/rtcor"
+    transforms:
+      radar: 
+        default_rainrate: {mean: 0.03019706713265408, std: 0.5392297631902654}
 
   split_info:
     split_rules:
@@ -31,7 +25,7 @@ dataloader:
       - "harmonie"
       - "sat_l2"
       - "sat_l1p5"
-      - "aws"
+      - "aws_inter"
     clutter_threshold: 50
 
   sample_info:
@@ -48,16 +42,16 @@ dataloader:
   context_len: 8
   forecast_len: 0
   img_size: [4, 4]
-  stride: [1,1,1]
+  stride: [4,1,1]
   batch_size: 16
-  num_workers: 10
+  num_workers: 24
 trainer:
-  max_epochs: 1000
+  max_epochs: 100
   accelerator: "auto"
   strategy: "auto"
   precision: 32 #"16-mixed"
   profiler: "simple"
-  limit_train_batches: 1000
+  limit_train_batches: 2000
   # limit_val_batches: 20
   accumulate_grad_batches: 1
 logger:
@@ -76,27 +70,31 @@ callbacks:
     verbose: true
     mode: "min"
 optimizer:
-  lr: 1e-3
+  lr: 1e-4
   weight_decay: 1e-4
   betas: [0.5, 0.9]
   # scheduler
   patience: 3
-  factor: 0.25
+  factor: 0.1
   monitor: "val/rec_loss"
+loss:
+  crop_loss_weight: 0.0
 model:
   module_path: nowcasting.models.ldcast.models.autoenc.autoenc.AutoencoderKL
   checkpoint_path: null
+  compile: true
+
   enc_params: 
-    in_dim: 2
+    in_dim: 1
     levels: 2
     min_ch: 64
   dec_params:
-    in_dim: 2
+    in_dim: 1
     levels: 2
     min_ch: 64
   kl_weight: 0.01
-  encoder_channels: 64
-  hidden_width: 64
+  encoded_channels: 64
+  hidden_width: 32
 
 eval:
   model_name: "earthformer"

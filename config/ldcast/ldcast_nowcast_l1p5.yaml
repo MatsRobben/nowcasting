@@ -1,26 +1,48 @@
 dataloader:
   module_path: nowcasting.data.dataloader_zarrv3.NowcastingDataModule
-  path: "/vol/knmimo-nobackup/users/mrobben/nowcasting/data/dataset_regrid.zarr"
+  path: "/projects/prjs1634/nowcasting/data/dataset.zarr"
   var_info:
     sample_var: "radar/max_intensity_grid"
     latlon: false
     in_vars:
-      - ["radar/rtcor"]
-      - ["sat_l1p5/WV_062", "sat_l1p5/IR_108"]
+      - ["sat_l1p5/IR_016",
+        "sat_l1p5/IR_039",
+        "sat_l1p5/WV_062",
+        "sat_l1p5/WV_073",
+        "sat_l1p5/IR_087",
+        "sat_l1p5/IR_097",
+        "sat_l1p5/IR_108",
+        "sat_l1p5/IR_120",
+        "sat_l1p5/IR_134"]
     out_vars:
-      - "radar/rtcor"
-    transforms:
-      radar: 
-        dbz_normalization:
-          convert_to_dbz: true
-
-      sat_l1p5: 
-        resize:
-          scale: 2
+      - "sat_l1p5/IR_016"
+      - "sat_l1p5/IR_039"
+      - "sat_l1p5/WV_062"
+      - "sat_l1p5/WV_073"
+      - "sat_l1p5/IR_087"
+      - "sat_l1p5/IR_097"
+      - "sat_l1p5/IR_108"
+      - "sat_l1p5/IR_120"
+      - "sat_l1p5/IR_134"
+    transforms: 
       sat_l1p5/WV_062:
         normalize: {mean: 230.6474, std: 4.9752}
       sat_l1p5/IR_108:
         normalize: {mean: 266.7156, std: 16.5736}
+      sat_l1p5/IR_016:
+        normalize: {mean: 6.8788, std: 10.0196}
+      sat_l1p5/IR_039:
+        normalize: {mean: 269.7683, std: 14.6116}
+      sat_l1p5/WV_073:
+        normalize: {mean: 246.0418, std: 8.5848}
+      sat_l1p5/IR_087:
+        normalize: {mean: 264.6952, std: 15.4881}
+      sat_l1p5/IR_097:
+        normalize: {mean: 241.9831, std: 9.0873}
+      sat_l1p5/IR_120:
+        normalize: {mean: 265.4512, std: 16.6885}
+      sat_l1p5/IR_134:
+        normalize: {mean: 247.9466, std: 10.4477}
     
   split_info:
     split_rules:
@@ -37,7 +59,7 @@ dataloader:
       - "harmonie"
       - "sat_l2"
       - "sat_l1p5"
-      - "aws"
+      - "aws_inter"
     clutter_threshold: 50
 
   sample_info:
@@ -55,17 +77,26 @@ dataloader:
   forecast_len: 20
   include_timestamps: true
   img_size: [4, 4]
-  stride: [1,1,1]
+  stride: [4,1,1]
   batch_size: 8
-  num_workers: 8
+  num_workers: 32
+
+# dataloader:
+#   module_path: nowcasting.data.dataloader_random.RandomDataModule
+
+#   in_shape: [9, 4, 128, 128]
+#   out_shape: [9, 20, 128, 128]
+#   include_timestamps: true
+#   batch_size: 16
+#   num_workers: 8
 trainer:
-  max_epochs: 1000
+  max_epochs: 1
   accelerator: "auto"
   strategy: "auto"
   precision: "16-mixed"
   profiler: "simple"
   limit_train_batches: 1000
-  # limit_val_batches: 
+  limit_val_batches: 1000
   gradient_clip_val: 1.0
   gradient_clip_algorithm: "norm"
   accumulate_grad_batches: 1
@@ -73,12 +104,7 @@ logger:
   save_dir: "./results/tb_logs"
   name: "ldcast_nowcast"
 loss:
-  loss_name: "balanced"
-  min_val: 0.0
-  max_val: 55.0
-  max_weight_r: 30
-  weight_intensity: 1.0
-  extended: true
+  loss_name: "mse"
 callbacks:
   checkpoint:
     monitor: "val/loss"
@@ -97,57 +123,43 @@ optimizer:
   betas: [0.5, 0.9]
   # scheduler
   patience: 3
-  factor: 0.25
+  factor: 0.1
   monitor: "val/loss"
 model:
   module_path: nowcasting.models.ldcast.models.nowcast.nowcast.AFNONowcastModule
   checkpoint_path: null
-  compile: false
+  compile: true
   
   # Main model parameters
-  embed_dim: [128, 128]
-  analysis_depth: [4, 4]
+  embed_dim: [128]
+  analysis_depth: [4]
   forecast_depth: 4
-  input_patches: [1, 1]
-  input_size_ratios: [1, 1]
+  input_patches: [1]
+  input_size_ratios: [1]
   output_patches: 5
   afno_fusion: false
-  use_forecast: true
-  # per_input_forecast_depth: [0]
+  use_forecast: false
+  per_input_forecast_depth: [2]
   
   # Autoencoder configurations
   input_autoencoders:
-    -  # Radar autoencoder config
-      model:
-        enc_params:
-          in_dim: 1
-          levels: 2
-          min_ch: 64
-        dec_params:
-           in_dim: 1
-           levels: 2
-           min_ch: 64
-        kl_weight: 0.01
-        encoder_channels: 64
-        hidden_width: 32
     -  # Satellite autoencoder config
       model:
-        enc_params:
-          in_dim: 2
+        enc_params: 
+          in_dim: 9
           levels: 2
-          min_ch: 64
+          min_ch: 128
         dec_params:
-           in_dim: 2
-           levels: 2
-           min_ch: 64
+          in_dim: 9
+          levels: 2
+          min_ch: 128
         kl_weight: 0.01
-        encoder_channels: 64
-        hidden_width: 64
+        encoded_channels: 128
+        hidden_width: 128
   
   # Autoencoder checkpoints
   input_autoencoder_ckpts:
-    - "/vol/knmimo-nobackup/users/mrobben/nowcasting/results/tb_logs/ldcast_autoenc/version_6/checkpoints/epoch=37-step=38000.ckpt"
-    - "/vol/knmimo-nobackup/users/mrobben/nowcasting/results/tb_logs/ldcast_autoenc/version_9/checkpoints/epoch=101-step=102000.ckpt"
+    - "/projects/prjs1634/nowcasting/results/tb_logs/ldcast_autoenc/version_2/checkpoints/epoch=167-step=168000.ckpt"
 
   # Output autoencoder
   # Default: take first input_autoencoder
@@ -155,8 +167,7 @@ model:
   # Freezing options
   pretrained_paths:
     - null
-    - "/vol/knmimo-nobackup/users/mrobben/nowcasting/results/tb_logs/ldcast_nowcast/version_8/checkpoints/epoch=78-step=79000.ckpt"
-  freeze_pretrained: [false, true]  # Freeze satellite pipeline
+  freeze_pretrained: [false]  # Freeze satellite pipeline
 
 eval:
   model_path: nowcasting.benchmarks.ldcast_nowcast.LDCastNowcastNet

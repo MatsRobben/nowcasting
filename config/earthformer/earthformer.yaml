@@ -1,40 +1,16 @@
 dataloader:
   module_path: nowcasting.data.dataloader_zarrv3.NowcastingDataModule
-  path: "/vol/knmimo-nobackup/users/mrobben/nowcasting/data/dataset_regrid.zarr"
+  path: "/projects/prjs1634/nowcasting/data/dataset.zarr"
   var_info:
     sample_var: "radar/max_intensity_grid"
+    latlon: false
     in_vars:
       - "radar/rtcor"
-      - "harmonie/PRES_GDS0_GPML" # Presure
-      - "harmonie/TMP_GDS0_HTGL" # Temperature
-      - "harmonie/DPT_GDS0_HTGL" # Dew point Temperature
-      - "harmonie/U_GRD_GDS0_HTGL" # U component of wind
-      - "harmonie/V_GRD_GDS0_HTGL" # V component of wind
-      - "harmonie/R_H_GDS0_HTGL" # Relative Humitaty
-      - "harmonie/A_PCP_GDS0_HTGL_acc" # Total Precipitaiton 
-      - "harmonie/T_CDC_GDS0_HTGL" # Total cloud cover
-      - "harmonie/KNMI_var_201_entatm" # Graupel (Entire atmosphere)
-    out_vars: 
+    out_vars:
       - "radar/rtcor"
     transforms: 
       radar: 
-        dbz_normalization:
-          convert_to_dbz: true
-      harmonie: 
-        resize:
-          scale: 2
-      harmonie/PRES_GDS0_GPML:
-        normalize: {mean: 101561.22319815714, std: 1086.8065468683621}
-      harmonie/DPT_GDS0_HTGL:
-        normalize: {mean: 280.02349829680645, std: 5.57281521209835}
-      harmonie/R_H_GDS0_HTGL:
-        normalize: {mean: 0.8194103129556326, std: 0.14297640025250816}
-      harmonie/A_PCP_GDS0_HTGL_acc:
-        normalize: {mean: 0.09991637987204555, std: 0.45573451345607613}
-      harmonie/T_CDC_GDS0_HTGL:
-        normalize: {mean: 0.7056532355251186, std: 0.4124938691551687}
-      harmonie/KNMI_var_201_entatm:
-        normalize: {mean: 0.01663923929552923, std: 0.1512492953711808}
+        default_rainrate: {mean: 0.03019706713265408, std: 0.5392297631902654}
 
   split_info:
     split_rules:
@@ -50,41 +26,40 @@ dataloader:
       - "radar"
       - "harmonie"
       - "sat_l2"
+      - "sat_l1p5"
+      - "aws"
+    clutter_threshold: 50
 
   sample_info:
-    # bins:
-    #   n_bins: 15
-    #   first_bin: 0.2
-    #   last_bin: 15.0
-    #   scaler: 5.1 # 255/50
-    #   n_samples: 50000
-    threshold: 20
+    threshold: 0.01
     methods:
       train:
         agg: "mean_pool"
+        center_crop: true
       val:
         agg: "mean_pool"
         center_crop: true
       test:
         agg: "mean_pool"
+        center_crop: true
 
   context_len: 4
   forecast_len: 18
   img_size: [8, 8]
   stride: [1,1,1]
-  batch_size: 8
-  num_workers: 8
+  batch_size: 16
+  num_workers: 36
 trainer:
-  max_epochs: 500
+  max_epochs: 60
   accelerator: "auto"
-  strategy: "ddp_find_unused_parameters_true"
+  strategy: "auto" #"ddp_find_unused_parameters_true"
   precision: "16-mixed"
   profiler: "simple"
   limit_train_batches: 1000
-  # limit_val_batches: 150
+  # limit_val_batches: 20
   gradient_clip_val: 1.0
   gradient_clip_algorithm: "norm"
-  accumulate_grad_batches: 2
+  accumulate_grad_batches: 1
 logger:
   save_dir: "./results/tb_logs"
   name: "earthformer"
@@ -97,7 +72,7 @@ callbacks:
   early_stopping:
     monitor: "val/loss"
     min_delta: 0.0
-    patience: 20
+    patience: 15
     verbose: true
     mode: "min"
 optimizer:
@@ -109,11 +84,20 @@ optimizer:
   min_lr_ratio: 1.0e-3
   warmup_min_lr_ratio: 0.0
   warmup_percentage: 0.2
-
+loss:
+  loss_name: "balanced"
+  normalization: "zscore"
+  mean_log_rain: 0.03019706713265408
+  std_log_rain: 0.5392297631902654
+  max_weight_r: 30
+  weight_intensity: 1.0
+  extended: true
 model:
   module_path: nowcasting.models.earthformer.earthformer.CuboidSEVIRPLModule
   checkpoint_path: null
-  input_shape: [4, 256, 256, 7]
+  compile: true
+
+  input_shape: [4, 256, 256, 1]
   target_shape: [18, 256, 256, 1]
   base_units: 128
   block_units: null
@@ -121,21 +105,21 @@ model:
 
   enc_depth: [1, 1]
   dec_depth: [1, 1]
-  enc_use_inter_ffn: true 
+  enc_use_inter_ffn: true
   dec_use_inter_ffn: true
-  dec_hierarchical_pos_embed: true 
+  dec_hierarchical_pos_embed: false
 
-  downsample: 2 
-  downsample_type: "patch_merge" 
-  upsample_type: "upsample" 
+  downsample: 2
+  downsample_type: "patch_merge"
+  upsample_type: "upsample"
 
-  num_global_vectors: 32 
-  use_dec_self_global: true 
+  num_global_vectors: 8
+  use_dec_self_global: false
   dec_self_update_global: true
-  use_dec_cross_global: true 
-  use_global_vector_ffn: true 
-  use_global_self_attn: false 
-  separate_global_qkv: false 
+  use_dec_cross_global: false
+  use_global_vector_ffn: false
+  use_global_self_attn: true
+  separate_global_qkv: true
   global_dim_ratio: 1
 
   # self_pattern: "axial"
@@ -149,10 +133,10 @@ model:
   attn_drop: 0.1
   proj_drop: 0.1
   ffn_drop: 0.1
-  num_heads: 16 
+  num_heads: 4
 
   ffn_activation: "gelu"
-  gated_ffn: true 
+  gated_ffn: false
   norm_layer: "layer_norm"
   padding_type: "zeros"
   pos_embed_type: "t+h+w"
@@ -165,10 +149,10 @@ model:
 
   initial_downsample_type: "stack_conv"
   initial_downsample_activation: "leaky"
-  initial_downsample_stack_conv_num_layers: 2
-  initial_downsample_stack_conv_dim_list: [32, 128]
-  initial_downsample_stack_conv_downscale_list: [3, 2]
-  initial_downsample_stack_conv_num_conv_list: [2, 2]
+  initial_downsample_stack_conv_num_layers: 3
+  initial_downsample_stack_conv_dim_list: [16, 64, 128]
+  initial_downsample_stack_conv_downscale_list: [3, 2, 2]
+  initial_downsample_stack_conv_num_conv_list: [2, 2, 2]
 
   attn_linear_init_mode: "0"
   ffn_linear_init_mode: "0"

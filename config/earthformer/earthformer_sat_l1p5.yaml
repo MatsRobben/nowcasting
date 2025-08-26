@@ -1,17 +1,61 @@
 dataloader:
   module_path: nowcasting.data.dataloader_zarrv3.NowcastingDataModule
-  path: "/vol/knmimo-nobackup/users/mrobben/nowcasting/data/dataset_regrid.zarr"
+  path: "/projects/prjs1634/nowcasting/data/dataset.zarr"
   var_info:
     sample_var: "radar/max_intensity_grid"
     latlon: false
     in_vars:
       - "radar/rtcor"
+      - "sat_l1p5/IR_016"
+      - "sat_l1p5/IR_039"
+      - "sat_l1p5/WV_062"
+      - "sat_l1p5/WV_073"
+      - "sat_l1p5/IR_087"
+      - "sat_l1p5/IR_097"
+      - "sat_l1p5/IR_108"
+      - "sat_l1p5/IR_120"
+      - "sat_l1p5/IR_134"
     out_vars:
       - "radar/rtcor"
+      - "sat_l1p5/IR_016"
+      - "sat_l1p5/IR_039"
+      - "sat_l1p5/WV_062"
+      - "sat_l1p5/WV_073"
+      - "sat_l1p5/IR_087"
+      - "sat_l1p5/IR_097"
+      - "sat_l1p5/IR_108"
+      - "sat_l1p5/IR_120"
+      - "sat_l1p5/IR_134"
     transforms: 
       radar: 
-        dbz_normalization:
-          convert_to_dbz: true
+        default_rainrate: {mean: 0.03019706713265408, std: 0.5392297631902654}
+      sat_l1p5/WV_062:
+        normalize: {mean: 230.6474, std: 4.9752}
+        resize: {scale: 2}
+      sat_l1p5/IR_108:
+        normalize: {mean: 266.7156, std: 16.5736}
+        resize: {scale: 2}
+      sat_l1p5/IR_016:
+        normalize: {mean: 6.8788, std: 10.0196}
+        resize: {scale: 2}
+      sat_l1p5/IR_039:
+        normalize: {mean: 269.7683, std: 14.6116}
+        resize: {scale: 2}
+      sat_l1p5/WV_073:
+        normalize: {mean: 246.0418, std: 8.5848}
+        resize: {scale: 2}
+      sat_l1p5/IR_087:
+        normalize: {mean: 264.6952, std: 15.4881}
+        resize: {scale: 2}
+      sat_l1p5/IR_097:
+        normalize: {mean: 241.9831, std: 9.0873}
+        resize: {scale: 2}
+      sat_l1p5/IR_120:
+        normalize: {mean: 265.4512, std: 16.6885}
+        resize: {scale: 2}
+      sat_l1p5/IR_134:
+        normalize: {mean: 247.9466, std: 10.4477}
+        resize: {scale: 2}
 
   split_info:
     split_rules:
@@ -32,6 +76,13 @@ dataloader:
     clutter_threshold: 50
 
   sample_info:
+    # bins:
+    #   n_bins: 25
+    #   first_bin: 0.06
+    #   last_bin: 6.0
+    #   slope: 0.6
+    #   scaler: 5.1 # 255/50
+    #   n_samples: 32000
     threshold: 0.01
     methods:
       train:
@@ -39,15 +90,13 @@ dataloader:
       val:
         agg: "mean_pool"
         center_crop: true
-      test:
-        agg: "mean_pool"
 
   context_len: 4
   forecast_len: 18
   img_size: [8, 8]
-  stride: [1,1,1]
-  batch_size: 8
-  num_workers: 12
+  stride: [4,1,1]
+  batch_size: 16
+  num_workers: 20
 trainer:
   max_epochs: 60
   accelerator: "auto"
@@ -55,7 +104,7 @@ trainer:
   precision: "16-mixed"
   profiler: "simple"
   limit_train_batches: 1000
-  # limit_val_batches: 20
+  # limit_val_batches: 100
   gradient_clip_val: 1.0
   gradient_clip_algorithm: "norm"
   accumulate_grad_batches: 1
@@ -71,7 +120,7 @@ callbacks:
   # early_stopping:
   #   monitor: "val/loss"
   #   min_delta: 0.0
-  #   patience: 15
+  #   patience: 5
   #   verbose: true
   #   mode: "min"
 optimizer:
@@ -83,18 +132,31 @@ optimizer:
   min_lr_ratio: 1.0e-3
   warmup_min_lr_ratio: 0.0
   warmup_percentage: 0.2
+# loss:
+#   loss_name: "balanced"
+#   normalization: "zscore"
+#   mean_log_rain: 0.03019706713265408
+#   std_log_rain: 0.5392297631902654
+#   max_weight_r: 30
+#   weight_intensity: 1.0
+#   extended: true
 loss:
-  loss_name: "balanced"
-  min_val: 0.0
-  max_val: 55.0
-  max_weight_r: 35
+  loss_name: "multi-source"
+  balanced_channels: [0]
+  mse_channels: [1,2,3,4,5,6,7,8,9]
+  channel_wegihts: [1,0.11,0.11,0.11,0.11,0.11,0.11,0.11,0.11,0.11]
+  mean_log_rain: 0.03019706713265408
+  std_log_rain: 0.5392297631902654
+  max_weight_r: 30
   weight_intensity: 1.0
-  extended: false
+  extended: true
 model:
   module_path: nowcasting.models.earthformer.earthformer.CuboidSEVIRPLModule
   checkpoint_path: null
-  input_shape: [4, 256, 256, 1]
-  target_shape: [18, 256, 256, 1]
+  compile: false
+
+  input_shape: [4, 256, 256, 10]
+  target_shape: [18, 256, 256, 10]
   base_units: 128
   block_units: null
   scale_alpha: 1.0
@@ -156,5 +218,26 @@ model:
   down_up_linear_init_mode: "0"
   norm_init_mode: "0"
 eval:
-  model_name: "earthformer"
-  num_samples: 32000
+  model_path: nowcasting.benchmarks.earthformer.EarthformerModel
+  model_name: "efL_rad_sat_balancedextendedloss"
+interpret:
+  groups:
+    # - [0] # Radar
+    - [1] # IR_016
+    - [2] # IR_039
+    - [3] # WV_062
+    - [4] # WV_073
+    - [5] # IR_087
+    - [6] # IR_097
+    - [7] # IR_108
+    - [8] # IR_120
+    - [9] # IR_134
+  # You can also group them:
+  # groups:
+  #   - [0]         # Radar
+  #   - [1, 2, 3]   # A group of channels, e.g., IR and WV
+  #   - [4, 5, 6, 7, 8, 9] # The rest
+  max_batches: null
+  device: "cuda"
+  use_amp: true
+  plot_path: "/projects/prjs1634/nowcasting/results/figures/earthformer_sat_l1p5/permutation_importance.png"

@@ -1,0 +1,172 @@
+dataloader:
+  module_path: nowcasting.data.dataloader_zarrv3.NowcastingDataModule
+  path: "/projects/prjs1634/nowcasting/data/dataset.zarr"
+  var_info:
+    sample_var: "radar/max_intensity_grid"
+    latlon: false
+    in_vars:
+      - ["radar/rtcor"]
+      - ["aws_inter/TOT_T_DRYB_10", # Dry bulb temp
+        "aws_inter/TOT_T_WETB_10", # Wet bulb temp
+        "aws_inter/TOT_T_DEWP_10", # Dew point temp
+        "aws_inter/TOW_FF_10M_10", # Wind speed
+        "aws_inter/TOW_DD_10", # Wind direction in 360 degrees
+        "aws_inter/TOA_P_STN_LEVEL_10", # Presure at station level
+        "aws_inter/TOS_Q_GLOB_10"] # Average global radaiation
+    out_vars:
+      - "radar/rtcor"
+    transforms:
+      radar: 
+        default_rainrate: {mean: 0.03019706713265408, std: 0.5392297631902654}
+
+      aws_inter/TOT_T_DRYB_10:
+        normalize: {mean: 11.296092, std: 6.215682}
+      aws_inter/TOT_T_WETB_10:
+        normalize: {mean: 9.308311, std: 5.298550}
+      aws_inter/TOT_T_DEWP_10:
+        normalize: {mean: 7.640987, std: 5.469701}
+      aws_inter/TOW_FF_10M_10:
+        normalize: {mean: 5.469827, std: 3.584101}
+      aws_inter/TOW_DD_10:
+        normalize: {mean: 190.055984, std: 95.192940}
+      aws_inter/TOA_P_STN_LEVEL_10:
+        normalize: {mean: 1013.361145, std: 11.233006}
+      aws_inter/TOS_Q_GLOB_10:
+        normalize: {mean: 129.000137, std: 213.522766}
+
+  split_info:
+    split_rules:
+      test:
+        year: 
+        - 2023
+      val:
+        month:
+          - 6
+          - 11
+      train: {}
+    apply_missing_masks:
+      - "radar"
+      - "harmonie"
+      - "sat_l2"
+      - "sat_l1p5"
+      - "aws_inter"
+    clutter_threshold: 50
+
+  sample_info:
+    threshold: 0.01
+    methods:
+      train:
+        agg: "mean_pool"
+      val:
+        agg: "mean_pool"
+        center_crop: true
+      test:
+        agg: "mean_pool"
+
+  context_len: 4
+  forecast_len: 20
+  include_timestamps: true
+  img_size: [8, 8]
+  stride: [4,1,1]
+  batch_size: 8
+  num_workers: 18
+trainer:
+  max_epochs: 42
+  accelerator: "auto"
+  strategy: "auto"
+  precision: "16-mixed"
+  profiler: "simple"
+  limit_train_batches: 2000
+  limit_val_batches: 1000
+  gradient_clip_val: 1.0
+  gradient_clip_algorithm: "norm"
+  accumulate_grad_batches: 1
+logger:
+  save_dir: "./results/tb_logs"
+  name: "ldcast_nowcast"
+loss:
+  loss_name: "balanced"
+  normalization: "zscore"
+  mean_log_rain: 0.03019706713265408
+  std_log_rain: 0.5392297631902654
+  max_weight_r: 30
+  weight_intensity: 1.0
+  extended: true
+callbacks:
+  checkpoint:
+    monitor: "val/loss"
+    save_top_k: 3
+    save_last: true
+    mode: "min"
+  # early_stopping:
+  #   monitor: "val/loss"
+  #   min_delta: 0.0
+  #   patience: 6
+  #   verbose: true
+  #   mode: "min"
+optimizer:
+  lr: 1e-3
+  weight_decay: 1e-4
+  betas: [0.5, 0.9]
+  # scheduler
+  patience: 3
+  factor: 0.1
+  monitor: "val/loss"
+model:
+  module_path: nowcasting.models.ldcast.models.nowcast.nowcast.AFNONowcastModule
+  checkpoint_path: null
+  compile: true
+  
+  # Main model parameters
+  embed_dim: [128, 128]
+  analysis_depth: [4, 4]
+  forecast_depth: 4
+  input_patches: [1, 1]
+  input_size_ratios: [1, 8]
+  output_patches: 5
+  afno_fusion: false
+  use_forecast: true
+  per_input_forecast_depth: [0, 2]
+  
+  # Autoencoder configurations
+  input_autoencoders:
+    -  # Radar autoencoder config
+      model:
+        enc_params:
+          in_dim: 1
+          levels: 2
+          min_ch: 64
+        dec_params:
+           in_dim: 1
+           levels: 2
+           min_ch: 64
+        kl_weight: 0.01
+        encoder_channels: 64
+        hidden_width: 32
+    -  # AWS autoencoder config
+      model:
+        enc_params: 
+          in_dim: 7
+          levels: 2
+          min_ch: 128
+        dec_params:
+          in_dim: 7
+          levels: 2
+          min_ch: 128
+        kl_weight: 0.01
+        encoded_channels: 128
+        hidden_width: 128
+  
+
+  # Autoencoder checkpoints
+  input_autoencoder_ckpts:
+    - "/projects/prjs1634/nowcasting/results/tb_logs/ldcast_autoenc/version_8/checkpoints/epoch=46-step=94000.ckpt"
+    - "/projects/prjs1634/nowcasting/results/tb_logs/ldcast_autoenc/version_7/checkpoints/epoch=99-step=200000.ckpt"
+
+  # Output autoencoder
+  # Default: take first input_autoencoder
+  
+  pretrained_paths:
+    - null
+    - "/projects/prjs1634/nowcasting/results/tb_logs/earthformer/version_19_renamed/checkpoints/epoch=47-step=48000.ckpt"
+  freeze_pretrained: [false, false]  # Freeze satellite pipeline

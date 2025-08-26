@@ -1,0 +1,123 @@
+dataloader:
+  module_path: nowcasting.data.dataloader_zarrv3.NowcastingDataModule
+  path: "/projects/prjs1634/nowcasting/data/dataset.zarr"
+  var_info:
+    sample_var: "radar/max_intensity_grid"
+    latlon: false
+    in_vars:
+      - "sat_l1p5/IR_016"
+      - "sat_l1p5/IR_039"
+      - "sat_l1p5/WV_062"
+      - "sat_l1p5/WV_073"
+      - "sat_l1p5/IR_087"
+      - "sat_l1p5/IR_097"
+      - "sat_l1p5/IR_108"
+      - "sat_l1p5/IR_120"
+      - "sat_l1p5/IR_134"
+    transforms: 
+      sat_l1p5/WV_062:
+        normalize: {mean: 230.6474, std: 4.9752}
+      sat_l1p5/IR_108:
+        normalize: {mean: 266.7156, std: 16.5736}
+      sat_l1p5/IR_016:
+        normalize: {mean: 6.8788, std: 10.0196}
+      sat_l1p5/IR_039:
+        normalize: {mean: 269.7683, std: 14.6116}
+      sat_l1p5/WV_073:
+        normalize: {mean: 246.0418, std: 8.5848}
+      sat_l1p5/IR_087:
+        normalize: {mean: 264.6952, std: 15.4881}
+      sat_l1p5/IR_097:
+        normalize: {mean: 241.9831, std: 9.0873}
+      sat_l1p5/IR_120:
+        normalize: {mean: 265.4512, std: 16.6885}
+      sat_l1p5/IR_134:
+        normalize: {mean: 247.9466, std: 10.4477}
+
+  split_info:
+    split_rules:
+      test:
+        year: 
+        - 2023
+      val:
+        month:
+          - 6
+          - 11
+      train: {}
+    apply_missing_masks:
+      - "radar"
+      - "harmonie"
+      - "sat_l2"
+      - "sat_l1p5"
+      - "aws_inter"
+    clutter_threshold: 50
+
+  sample_info:
+    threshold: 0.01
+    methods:
+      train:
+        agg: "mean_pool"
+      val:
+        agg: "mean_pool"
+        center_crop: true
+      test:
+        agg: "mean_pool"
+
+  context_len: 8
+  forecast_len: 0
+  img_size: [8, 8]
+  stride: [4,1,1]
+  batch_size: 16
+  num_workers: 24
+trainer:
+  max_epochs: 100
+  accelerator: "auto"
+  strategy: "auto"
+  precision: 32 #"16-mixed"
+  profiler: "simple"
+  limit_train_batches: 2000
+  # limit_val_batches: 20
+  accumulate_grad_batches: 1
+logger:
+  save_dir: "./results/tb_logs"
+  name: "ldcast_autoenc"
+callbacks:
+  checkpoint:
+    monitor: "val/rec_loss"
+    save_top_k: 3
+    save_last: true
+    mode: "min"
+  early_stopping:
+    monitor: "val/rec_loss"
+    min_delta: 0.0
+    patience: 6
+    verbose: true
+    mode: "min"
+optimizer:
+  lr: 1e-3
+  weight_decay: 1e-4
+  betas: [0.5, 0.9]
+  # scheduler
+  patience: 3
+  factor: 0.1
+  monitor: "val/rec_loss"
+model:
+  module_path: nowcasting.models.ldcast.models.autoenc.autoenc.AutoencoderKL
+  checkpoint_path: null
+  compile: true
+
+  enc_params: 
+    in_dim: 9
+    levels: 2
+    min_ch: 128
+  dec_params:
+    in_dim: 9
+    levels: 2
+    min_ch: 128
+  kl_weight: 0.01
+  encoded_channels: 128
+  hidden_width: 128
+
+eval:
+  model_name: "earthformer"
+  num_samples: 32000

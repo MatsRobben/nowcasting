@@ -3,71 +3,69 @@ from torch.amp import autocast
 
 import numpy as np
 from tqdm import tqdm
-from typing import List, Dict, Tuple, Callable, Union
+from typing import List, Dict, Tuple, Callable, Union, Any, Optional
+import collections
+
+def center_crop(tensor: Union[np.ndarray, torch.Tensor], size: Tuple[int, int]) -> Union[np.ndarray, torch.Tensor]:
+    """Center-crop tensor to specified size."""
+    h, w = tensor.shape[-2:]
+    ch, cw = h // 2, w // 2
+    h_start, w_start = ch - size[0] // 2, cw - size[1] // 2
+    return tensor[..., h_start:h_start + size[0], w_start:w_start + size[1]]
 
 def csi_metric(
-    pred: torch.Tensor,
-    target: torch.Tensor,
-    threshold: Union[float, List[float]] = 0.5,
+    threshold: Union[float, List[float]] = 5,
     time_idx: Union[int, List[int], None] = None,
-    reduce: str = 'mean'
-) -> Union[float, torch.Tensor]:
+    reduce: str = 'mean',
+    crop_center: Tuple[int, int] = None
+) -> Callable[[torch.Tensor, torch.Tensor], float]:
     """
-    Compute Critical Success Index (CSI) for precipitation nowcasting.
-    
-    Args:
-        pred: Model predictions (B, C, T, H, W)
-        target: Ground truth (same shape as pred)
-        threshold: Threshold value(s) in mm/h. Can be:
-                  - Single float (e.g., 0.5)
-                  - List of floats (e.g., [0.1, 1.0, 5.0])
-        time_idx: Time index/indices to evaluate. Can be:
-                  - None (all timesteps)
-                  - Single int (e.g., 12 for 60min)
-                  - List of ints (e.g., [6, 12, 18])
-        reduce: How to aggregate results:
-               - 'mean' : average across thresholds/timesteps
-               - 'none' : return raw results (T_thresholds × T_times)
-    
-    Returns:
-        CSI score(s). Shape depends on `reduce`:
-        - float if reduce='mean'
-        - tensor (n_thresholds, n_times) if reduce='none'
+    Returns a CSI metric function with preset parameters.
     """
-    # Convert inputs to lists for uniform processing
-    thresholds = [threshold] if isinstance(threshold, float) else threshold
-    time_indices = (
-        [time_idx] if isinstance(time_idx, int) 
-        else list(range(pred.shape[2])) if time_idx is None 
-        else time_idx
-    )
-    
-    # Initialize results tensor
-    results = torch.zeros(len(thresholds), len(time_indices))
-    
-    # Compute CSI for each threshold/time combination
-    for i, thresh in enumerate(thresholds):
-        for j, t in enumerate(time_indices):
-            # Slice the required timestep
-            pred_t = pred[:, :, t, :, :]
-            target_t = target[:, :, t, :, :]
-            
-            # Binarize
-            pred_bin = (pred_t > thresh).float()
-            target_bin = (target_t > thresh).float()
-            
-            # Confusion matrix
-            tp = (pred_bin * target_bin).sum()
-            fp = (pred_bin * (1 - target_bin)).sum()
-            fn = ((1 - pred_bin) * target_bin).sum()
-            
-            # CSI calculation
-            eps = 1e-8
-            results[i, j] = tp / (tp + fp + fn + eps)
-    
-    return results.mean() if reduce == 'mean' else results
+    def _csi_metric(pred: torch.Tensor, target: torch.Tensor) -> Union[float, torch.Tensor]:
+        thresholds = torch.tensor(threshold, device=pred.device) if not isinstance(threshold, torch.Tensor) else threshold
+        if crop_center:
+            pred = center_crop(pred, crop_center)
+            target = center_crop(target, crop_center)
 
-
+        if thresholds.dim() == 0:
+            thresholds = thresholds.unsqueeze(0)
+        
+        # Handle time indices
+        if time_idx is None:
+            time_indices = torch.arange(pred.shape[2], device=pred.device)
+        elif isinstance(time_idx, int):
+            time_indices = torch.tensor([time_idx], device=pred.device)
+        else:
+            time_indices = torch.tensor(time_idx, device=pred.device)
+        
+        # Select required timesteps
+        pred_sel = pred.index_select(2, time_indices)  # (B, C, T_sel, H, W)
+        target_sel = target.index_select(2, time_indices)
+        
+        # Reshape for broadcasting
+        pred_sel = pred_sel.unsqueeze(-1)  # (B, C, T_sel, H, W, 1)
+        target_sel = target_sel.unsqueeze(-1)
+        thresholds_reshaped = thresholds.view(1, 1, 1, 1, 1, -1)
+        
+        # Binarize with broadcasting
+        pred_bin = (pred_sel > thresholds_reshaped).float()
+        target_bin = (target_sel > thresholds_reshaped).float()
+        
+        # Compute confusion matrix
+        tp = (pred_bin * target_bin).sum(dim=(0, 1, 3, 4))  
+        fp = (pred_bin * (1 - target_bin)).sum(dim=(0, 1, 3, 4))
+        fn = ((1 - pred_bin) * target_bin).sum(dim=(0, 1, 3, 4))
+        
+        eps = 1e-8
+        csi = tp / (tp + fp + fn + eps)  # (T_sel, K)
+        
+        if reduce == 'mean':
+            return csi.mean().item()
+        else:
+            return csi.permute(1, 0)  # (K, T_sel)
+    
+    return _csi_metric
 
 def to_mmh(img, norm_method='zscore', mean=0.03019706713265408, std=0.5392297631902654):
     """
@@ -121,141 +119,206 @@ class PermutationImportance:
         metric: Callable[[torch.Tensor, torch.Tensor], float],
         device: str = "cuda",
         use_amp: bool = True,
-        verbose: bool = True
+        verbose: bool = True,
+        precompute_indices: bool = True,
+        model_type: str = "earthformer",  # 'earthformer' or 'ldcast'
     ):
-        """
-        Args:
-            model: Trained PyTorch model
-            metric: Evaluation metric function (y_pred, y_true) -> float (higher = better)
-            device: Device for computation
-            verbose: Show progress bar
-        """
         self.model = model.to(device).eval()
         self.metric = metric
         self.device = device
         self.verbose = verbose
-
+        self.precompute_indices = precompute_indices
+        self.perm_cache = {}
+        self.model_type = model_type.lower()
         self.use_amp = use_amp
+        
         if self.use_amp and self.device == "cpu":
             print("Warning: Mixed precision (AMP) is only available on CUDA devices.")
             self.use_amp = False
+            
+        # Validate model type
+        if self.model_type not in ["earthformer", "ldcast"]:
+            raise ValueError(f"Unsupported model_type: {model_type}. Must be 'earthformer' or 'ldcast'")
+        
+        print(self.model_type)
 
-    def _permute_tensor(
+    def permute_tensor(
         self, 
         tensor: torch.Tensor, 
         channel_indices: List[int]
     ) -> torch.Tensor:
-        """Permute selected channels across spatial dimensions"""
-        # print(channel_indices)
+        """Permute channels in a tensor (B, C, T, H, W)"""
+        if not channel_indices:
+            return tensor
+            
+        B, C, T, H, W = tensor.shape
+        C_perm = len(channel_indices)
+        key = (B, tuple(channel_indices), T, H, W)
+        
+        # Generate or reuse permutation indices
+        if self.precompute_indices and key in self.perm_cache:
+            perm_idx = self.perm_cache[key]
+        else:
+            perm_idx = torch.rand(B, C_perm, T, H * W, device=tensor.device).argsort(dim=-1)
+            if self.precompute_indices:
+                self.perm_cache[key] = perm_idx
+        
+        x = tensor[:, channel_indices, ...]
+        x_flat = x.reshape(B, C_perm, T, H * W)
+        x_perm_flat = torch.gather(x_flat, dim=-1, index=perm_idx)
+        tensor[:, channel_indices, ...] = x_perm_flat.reshape(B, C_perm, T, H, W)
+        return tensor
 
-        tensor_perm = tensor.clone()
-        for idx in channel_indices:
-            # Get all timesteps for this channel
-            # tensor shape: (B, T, H, W, C)
-            c_data = tensor_perm[:, :, :, :, idx]
-            c_shape = c_data.shape
+    def _preprocess_earthformer(self, batch: Tuple[torch.Tensor, torch.Tensor]) -> Tuple[Any, Any]:
+        """Earthformer: Convert to (B, T, H, W, C) format"""
+        inputs, targets = batch
+        inputs = inputs.permute(0, 2, 3, 4, 1).to(self.device)
+        targets = targets.permute(0, 2, 3, 4, 1).to(self.device)
+        return inputs, targets
+
+    def _postprocess_earthformer(self, pred: torch.Tensor, target: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Earthformer: Convert back to (B, C, T, H, W) and to mm/h"""
+        pred = pred.permute(0, 4, 1, 2, 3)
+        target = target.permute(0, 4, 1, 2, 3)
+        pred = to_mmh(pred)
+        target = to_mmh(target)
+        return pred, target
+
+    def _preprocess_ldcast(self, batch: Tuple[list, torch.Tensor]) -> Tuple[Any, Any]:
+        """Ldcast: Move all components to device"""
+        input_list, target = batch
+
+        # Process each modality in the input list
+        processed_list = []
+        for modality in input_list:
+            # Each modality is a tuple (tensor, timestamps)
+            tensor, timestamps = modality
+            tensor = tensor.to(self.device)
+            timestamps = timestamps.to(self.device)
+            processed_list.append((tensor, timestamps))
             
-            # Flatten spatial dimensions for each sample and timestep
-            flat_data = c_data.reshape(c_shape[0], c_shape[1], -1)  # (B, T, H*W)
+        target = target.to(self.device)
+        return processed_list, target
+
+    def _postprocess_ldcast(self, pred: torch.Tensor, target: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Ldcast: Convert to mm/h"""
+        pred = to_mmh(pred)
+        target = to_mmh(target)
+        return pred, target
+
+    def _permute_batch(self, batch: Any, perm_groups: List[Any]) -> Any:
+        """Apply permutations based on model type"""
+        if self.model_type == "earthformer":
+            inputs, targets = batch
+            flat_channels = [idx for group in perm_groups for idx in group]
+            inputs = self.permute_tensor(inputs, flat_channels)
+            return inputs, targets
             
-            # Permute each sample and timestep independently
-            for b in range(flat_data.shape[0]):
-                for t in range(flat_data.shape[1]):
-                    perm_idx = torch.randperm(flat_data.shape[2])
-                    flat_data[b, t] = flat_data[b, t, perm_idx]
+        elif self.model_type == "ldcast":
+            input_list, target = batch
+            # Create a mutable copy of the input list
+            permuted_list = []
             
-            # Reshape and insert back
-            tensor_perm[:, :, :, :, idx] = flat_data.reshape(c_shape)
-        return tensor_perm
+            # Apply permutations to each modality
+            for i, modality in enumerate(input_list):
+                tensor, timestamps = modality
+                
+                # Check if this modality has any groups to permute
+                mod_groups = []
+                for group in perm_groups:
+                    mod_idx, channels = group
+                    if mod_idx == i:
+                        mod_groups.append(channels)
+                
+                # Flatten all channel indices for this modality
+                flat_channels = [idx for channels in mod_groups for idx in channels]
+                
+                # Apply permutation if needed
+                if flat_channels:
+                    tensor = self.permute_tensor(tensor, flat_channels)
+                
+                permuted_list.append((tensor, timestamps))
+            
+            return (permuted_list, target)
 
     def multi_pass(
         self,
         dataloader: torch.utils.data.DataLoader,
-        groups: List[List[int]],
-        max_batches: int = None
+        groups: List[Any],
+        max_batches: int = None,
+        group_to_name: Callable[[Any], str] = None
     ) -> Tuple[List[str], List[float]]:
-        """
-        Args:
-            dataloader: Test dataloader yielding (input_tensor, target_tensor)
-            groups: List of channel index groups to permute [[0], [1], [2,3], ...]
-            max_batches: Limit batches for efficiency
-        
-        Returns:
-            ordered_groups: Group names in permutation order
-            metrics: Metric values after each permutation
-        """
-        # Baseline metric (no permutation)
+        group_to_name = group_to_name or (lambda x: f"Group_{x}")
         baseline_metric = self._evaluate(dataloader, [], max_batches)
         metrics = [baseline_metric]
         ordered_groups = []
         unpermuted = groups.copy()
         
-        # Multi-pass algorithm
         for _ in tqdm(range(len(groups)), disable=not self.verbose):
             candidate_metrics = []
 
             print(metrics)
             print(ordered_groups)
             print(unpermuted)
+            
             for candidate in unpermuted:
                 candidate_perm = ordered_groups + [candidate]
                 metric_val = self._evaluate(dataloader, candidate_perm, max_batches)
                 candidate_metrics.append(metric_val)
             
-            # Find candidate causing largest performance drop
-            worst_idx = np.argmin(candidate_metrics)
+            worst_idx = int(np.argmin(candidate_metrics))
             worst_group = unpermuted[worst_idx]
-            
-            # Update lists
             ordered_groups.append(worst_group)
             unpermuted.remove(worst_group)
             metrics.append(candidate_metrics[worst_idx])
         
-        # Convert groups to readable names
-        ordered_group_names = [f"Channels_{g}" for g in ordered_groups]
+        ordered_group_names = [group_to_name(g) for g in ordered_groups]
         return ordered_group_names, metrics
 
     def _evaluate(
         self,
         dataloader: torch.utils.data.DataLoader,
-        perm_groups: List[List[int]],
+        perm_groups: List[Any],
         max_batches: int = None
     ) -> float:
-        """Evaluate model with given permutation groups applied"""
         total_metric, total_samples = 0, 0
         batch_iter = dataloader if not self.verbose else tqdm(dataloader)
-
-        # Determine the data type for autocast on CPU
-        amp_dtype = torch.bfloat16 if self.device == 'cpu' and self.use_amp else torch.float16
+        amp_dtype = torch.bfloat16 if self.device == 'cpu' else torch.float16
         
-        for i, (inputs, targets) in enumerate(batch_iter):
+        for i, batch in enumerate(batch_iter):
             if max_batches and i >= max_batches:
                 break
-
-            # Shape (B, C, T, W, H) -> Earthformer Shape (B, T, W, H, C)
-            inputs = inputs.permute(0, 2, 3, 4, 1).to(self.device)
-            targets = targets.permute(0, 2, 3, 4, 1).to(self.device)
                 
             # Apply permutations
-            if perm_groups:
-                inputs = self._permute_tensor(inputs, 
-                    channel_indices=[idx for group in perm_groups for idx in group]
-                )
+            batch_perm = self._permute_batch(batch, perm_groups)
+            
+            # Preprocess
+            if self.model_type == "earthformer":
+                model_input, target = self._preprocess_earthformer(batch_perm)
+            elif self.model_type == "ldcast":
+                model_input, target = self._preprocess_ldcast(batch_perm)
             
             # Forward pass
-            with torch.no_grad(), autocast(device_type=self.device, dtype=amp_dtype, enabled=self.use_amp):
-                preds = self.model(inputs)
-
-                preds = to_mmh(preds)
-                targets = to_mmh(targets)
-
-                metric_val = self.metric(preds, targets)
+            with torch.inference_mode(), autocast(
+                device_type=self.device,
+                dtype=amp_dtype,
+                enabled=self.use_amp
+            ):
+                # For ldcast, model_input is a list of (tensor, timestamps) tuples
+                pred = self.model(model_input)
+                
+                # Postprocess
+                if self.model_type == "earthformer":
+                    pred_metric, target_metric = self._postprocess_earthformer(pred, target)
+                elif self.model_type == "ldcast":
+                    pred_metric, target_metric = self._postprocess_ldcast(pred, target)
+                
+                metric_val = self.metric(pred_metric, target_metric)
             
-            # Accumulate
-            total_metric += metric_val * targets.shape[0]
-            total_samples += targets.shape[0]
+            total_metric += metric_val
+            total_samples += 1  # Assuaming metric is averaged per batch
         
-        return total_metric / total_samples
+        return total_metric / total_samples if total_samples > 0 else 0.0
 
 
 if __name__ == "__main__":

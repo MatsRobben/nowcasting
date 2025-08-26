@@ -80,7 +80,8 @@ class NowcastingDataset(Dataset):
         context_len: int = 4,
         forecast_len: int = 18,
         include_timestamps: bool = False,
-        use_crop: bool | collections.abc.Sequence = True
+        use_crop: bool | collections.abc.Sequence = True,
+        return_index: bool = False
     ):
         self.df = df
         self.root = root
@@ -91,6 +92,7 @@ class NowcastingDataset(Dataset):
         self.forecast_len = forecast_len
         self.include_timestamps = include_timestamps
         self.use_crop = use_crop
+        self.return_index = return_index
 
         # Analyze input/output structure
         self._setup_variables()
@@ -466,16 +468,20 @@ class NowcastingDataset(Dataset):
         # Load context and future data using optimized strategy
         context = self._load_context_data(t0, t1, spatial_slices, full_data_cache, crop_data, harmonie_timestamps)
         future = self._load_future_data(t1, t2, spatial_slices[0], full_data_cache)
+        
+        # Build return tuple
+        out = []
+        if context is not None:
+            out.append(context)
+        if future is not None:
+            out.append(future)
+        if self.return_index:
+            out.append((t_idx, h_idx, w_idx))
 
-        # Return appropriate format
-        if context is not None and future is not None:
-            return context, future
-        elif context is not None:
-            return context
-        elif future is not None:
-            return future
-        else:
+        if not out:
             raise ValueError("Both context and future data are empty")
+        return tuple(out)
+
 
 class NowcastingDataModule(L.LightningDataModule):
     """
@@ -567,6 +573,7 @@ class NowcastingDataModule(L.LightningDataModule):
         use_crop: bool | collections.abc.Sequence = True,
         img_size: collections.abc.Sequence[int, int] | collections.abc.Sequence[tuple[int, int]] = (8, 8),
         stride: collections.abc.Sequence[int, int, int] = (1, 1, 1),
+        return_index: bool = False,
         batch_size: int = 16,
         num_workers: int = 8,
     ):
@@ -581,6 +588,7 @@ class NowcastingDataModule(L.LightningDataModule):
         self.use_crop = use_crop
         self.img_size = img_size
         self.stride = stride
+        self.return_index = return_index
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.sample_info = sample_info
@@ -655,7 +663,7 @@ class NowcastingDataModule(L.LightningDataModule):
             raise KeyError(f"Sample variable '{sample_array_path}' not found in Zarr store.")
 
         # Create a global time mask to filter out missing data or high clutter periods.
-        time_mask = self._create_time_mask(root, len(sample_array))
+        time_mask = self._create_mask(root, len(sample_array))
 
         # Generate DataFrames for each split (train, val, test) containing sample indices and weights.
         dfs = get_sample_dfs(
@@ -694,13 +702,14 @@ class NowcastingDataModule(L.LightningDataModule):
                 context_len=self.context_len,
                 forecast_len=self.forecast_len,
                 include_timestamps=self.include_timestamps,
-                use_crop=self.use_crop
+                use_crop=self.use_crop,
+                return_index=self.return_index
             )
             # Create a weighted sampler only for the training dataset if 'bins' are configured.
             if name == 'train' and 'bins' in self.sample_info:
                 self._create_sampler(df, self.sample_info['bins'])
 
-    def _create_time_mask(self, root: zarr.Group, num_timesteps: int) -> np.ndarray:
+    def _create_mask(self, root: zarr.Group, num_timesteps: int) -> np.ndarray:
         """
         Generates a global boolean time mask based on missing data and clutter scores.
 
@@ -753,6 +762,14 @@ class NowcastingDataModule(L.LightningDataModule):
             global_mask &= clutter_mask
         else:
             warnings.warn("Radar group or 'clutter_score' dataset not found. Skipping clutter masking.")
+
+        if self.split_info.get('convection_mask', False):
+            if 'sat_l1p5' in root and 'convection_mask' in root['sat_l1p5']:
+                convection_mask = root['sat_l1p5']['convection_mask'][:]
+
+                global_mask &= convection_mask
+            else:
+                warnings.warn("sat_l1p5 group or 'convection_mask' dataset not found. Skipping convection masking.")
 
         return global_mask
 
@@ -971,6 +988,7 @@ if __name__ == "__main__":
         'apply_missing_masks': ['radar', 'harmonie', 'sat_l2', 'sat_l1p5', 'aws_inter'],
         # clutter_threshold: Radar clutter score threshold. Samples with clutter score > 50 are ignored.
         'clutter_threshold': 50,
+        'convection_mask': True,
     }   
 
     # sample_info: Configuration for how samples are generated and optionally weighted.

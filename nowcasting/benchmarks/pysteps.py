@@ -79,11 +79,16 @@ class PySTEPSModel:
 
         Returns:
             np.ndarray
-                An array of shape (future_timesteps, height, width, ensemble_size)
-                filled with `zerovalue`.
+                For STEPS: (future_timesteps, height, width, ensemble_size)
+                For S-PROG: (future_timesteps, height, width, 1)
         """
-        out_shape = (self.future_timesteps,) + R.shape[1:] + \
-            (self.ensemble_size,)
+        spatial_shape = R.shape[1:]
+
+        if self.method_name == "sprog":
+            out_shape = (self.future_timesteps,) + spatial_shape + (1,)
+        else:  # steps or other ensemble-based methods
+            out_shape = (self.future_timesteps,) + spatial_shape + (self.ensemble_size,)
+
         return np.full(out_shape, zerovalue, dtype=R.dtype)
 
     def predict_sample(self, x: np.ndarray, threshold: float = -10.0, zerovalue: float = -15.0) -> np.ndarray:
@@ -133,18 +138,25 @@ class PySTEPSModel:
             V = dense_lucaskanade(R, verbose=False)
             try:
                 if self.method_name == "sprog":
-                    arr = self.nowcast_method(
-                        R, V,
-                        self.future_timesteps,
-                        precip_thr=threshold,
-                        n_cascade_levels=self.n_cascade_levels,
-                        ar_order=self.ar_order,
-                        decomp_method=self.decomp_method,
-                        bandpass_filter_method=self.bandpass_filter,
-                        probmatching_method=self.probmeth,
-                        measure_time=False
-                    )
-                    R_f = arr[..., np.newaxis]
+                    try:
+                        arr = self.nowcast_method(
+                            R, V,
+                            self.future_timesteps,
+                            precip_thr=threshold,
+                            n_cascade_levels=self.n_cascade_levels,
+                            ar_order=self.ar_order,
+                            decomp_method=self.decomp_method,
+                            bandpass_filter_method=self.bandpass_filter,
+                            probmatching_method=self.probmeth,
+                            measure_time=False
+                        )
+                        R_f = arr[..., np.newaxis]
+                    except IndexError as e:
+                        if "out of bounds" in str(e):
+                            # Known PySTEPS S-PROG bug with uniform fields
+                            R_f = self.zero_prediction(R, zerovalue)
+                        else:
+                            raise
                 else:  # steps
                     arr = self.nowcast_method(
                         R, V,
@@ -211,15 +223,11 @@ class PySTEPSModel:
                 - y_hat: The predicted precipitation field, a NumPy array of shape
                   (Batch, Time, Height, Width, Channel=1, Ensemble_Size).
         """ 
-        while isinstance(x, list) or isinstance(x, tuple):
-            x = x[0]
-
         x = np.asarray(x)
+        y = np.asarray(y)
 
         # Shape (B, C, T, W, H) -> PySteps Shape (B, T, W, H, C)
         x = x.transpose(0, 2, 3, 4, 1)
-
-        print("Input stats:", x.shape, np.min(x), np.max(x), np.isnan(x).sum())
 
         pred = self.predict_sample
         if parallel:
@@ -232,9 +240,7 @@ class PySTEPSModel:
             y_hat = dask.compute(y_hat, scheduler="threads", num_workers=len(y_hat))[0]
         y_hat = np.stack(y_hat, axis=0)
 
-        print("y_hat stats:", x.shape, np.min(x), np.max(x), np.isnan(x).sum())
-
         # Shape (B, T, W, H, C) -> PySteps Shape (B, C, T, W, H)
-        x = x.transpose(0, 4, 1, 2, 3)
+        y_hat = y_hat.transpose(0, 4, 1, 2, 3)
 
         return y, y_hat

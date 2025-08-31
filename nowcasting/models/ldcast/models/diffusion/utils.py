@@ -40,35 +40,78 @@ def make_beta_schedule(schedule, n_timestep, linear_start=1e-4, linear_end=2e-2,
     return betas.numpy()
 
 
+# def make_ddim_timesteps(ddim_discr_method, num_ddim_timesteps, num_ddpm_timesteps, verbose=True):
+#     if ddim_discr_method == 'uniform':
+#         c = num_ddpm_timesteps // num_ddim_timesteps
+#         ddim_timesteps = np.asarray(list(range(0, num_ddpm_timesteps, c)))
+#     elif ddim_discr_method == 'quad':
+#         ddim_timesteps = ((np.linspace(0, np.sqrt(num_ddpm_timesteps * .8), num_ddim_timesteps)) ** 2).astype(int)
+#     else:
+#         raise NotImplementedError(f'There is no ddim discretization method called "{ddim_discr_method}"')
+
+#     # assert ddim_timesteps.shape[0] == num_ddim_timesteps
+#     # add one to get the final alpha values right (the ones from first scale to data during sampling)
+#     steps_out = ddim_timesteps + 1
+#     if verbose:
+#         print(f'Selected timesteps for ddim sampler: {steps_out}')
+#     return steps_out
+
 def make_ddim_timesteps(ddim_discr_method, num_ddim_timesteps, num_ddpm_timesteps, verbose=True):
     if ddim_discr_method == 'uniform':
         c = num_ddpm_timesteps // num_ddim_timesteps
-        ddim_timesteps = np.asarray(list(range(0, num_ddpm_timesteps, c)))
+        ddim_timesteps = torch.arange(0, num_ddpm_timesteps, c, dtype=torch.long)
     elif ddim_discr_method == 'quad':
-        ddim_timesteps = ((np.linspace(0, np.sqrt(num_ddpm_timesteps * .8), num_ddim_timesteps)) ** 2).astype(int)
+        # Create linspace using torch
+        linspace = torch.linspace(0, torch.sqrt(torch.tensor(num_ddpm_timesteps * 0.8)), num_ddim_timesteps)
+        ddim_timesteps = (linspace ** 2).long()
     else:
         raise NotImplementedError(f'There is no ddim discretization method called "{ddim_discr_method}"')
 
-    # assert ddim_timesteps.shape[0] == num_ddim_timesteps
-    # add one to get the final alpha values right (the ones from first scale to data during sampling)
+    # add one to get the final alpha values right
     steps_out = ddim_timesteps + 1
+    
     if verbose:
         print(f'Selected timesteps for ddim sampler: {steps_out}')
+    
     return steps_out
 
 
 def make_ddim_sampling_parameters(alphacums, ddim_timesteps, eta, verbose=True):
+    # Ensure inputs are on CPU if they're tensors
+    if torch.is_tensor(alphacums):
+        alphacums_cpu = alphacums.cpu()
+    else:
+        alphacums_cpu = alphacums
+    
+    if torch.is_tensor(ddim_timesteps):
+        ddim_timesteps_cpu = ddim_timesteps.cpu().numpy()
+    else:
+        ddim_timesteps_cpu = ddim_timesteps
+    
+    # Convert to numpy arrays if needed
+    if not isinstance(alphacums_cpu, np.ndarray):
+        alphacums_np = np.array(alphacums_cpu)
+    else:
+        alphacums_np = alphacums_cpu
+    
     # select alphas for computing the variance schedule
-    alphas = alphacums[ddim_timesteps]
-    alphas_prev = np.asarray([alphacums[0]] + alphacums[ddim_timesteps[:-1]].tolist())
+    alphas = alphacums_np[ddim_timesteps_cpu]
+    alphas_prev = np.concatenate([[alphacums_np[0]], alphacums_np[ddim_timesteps_cpu[:-1]]])
 
     # according the the formula provided in https://arxiv.org/abs/2010.02502
     sigmas = eta * np.sqrt((1 - alphas_prev) / (1 - alphas) * (1 - alphas / alphas_prev))
+    
     if verbose:
         print(f'Selected alphas for ddim sampler: a_t: {alphas}; a_(t-1): {alphas_prev}')
         print(f'For the chosen value of eta, which is {eta}, '
               f'this results in the following sigma_t schedule for ddim sampler {sigmas}')
-    return sigmas, alphas, alphas_prev
+    
+    # Convert back to torch tensors
+    sigmas_t = torch.from_numpy(sigmas).to(alphacums.device if torch.is_tensor(alphacums) else 'cpu')
+    alphas_t = torch.from_numpy(alphas).to(alphacums.device if torch.is_tensor(alphacums) else 'cpu')
+    alphas_prev_t = torch.from_numpy(alphas_prev).to(alphacums.device if torch.is_tensor(alphacums) else 'cpu')
+    
+    return sigmas_t, alphas_t, alphas_prev_t
 
 
 def betas_for_alpha_bar(num_diffusion_timesteps, alpha_bar, max_beta=0.999):

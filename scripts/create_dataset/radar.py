@@ -506,7 +506,7 @@ def write_shard(dataset, buffer):
     buffer["data"].clear()
 
 def main():
-    root = zarr.open_group(ZARR_OUTPUT_PATH, mode='w')
+    root = zarr.open_group(ZARR_OUTPUT_PATH, mode='a')
     group = root.create_group('radar')
     print(f"Zarr store initialized at {ZARR_OUTPUT_PATH}")
 

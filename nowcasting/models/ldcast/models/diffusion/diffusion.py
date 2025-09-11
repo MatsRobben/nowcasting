@@ -227,7 +227,7 @@ class LatentDiffusion(L.LightningModule):
         with self.ema_scope():
             loss_ema = self.shared_step(batch)
 
-        if batch_idx == 73 and self.global_rank == 0:
+        if batch_idx == 15 and self.global_rank == 0:
             (x, y) = batch
             x_s = x[0][0][0:1]
             x_t = x[0][1][0:1]

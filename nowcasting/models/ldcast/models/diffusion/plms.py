@@ -27,34 +27,48 @@ class PLMSSampler:
     def make_schedule(self, ddim_num_steps, ddim_discretize="uniform", ddim_eta=0., verbose=True):
         if ddim_eta != 0:
             raise ValueError('ddim_eta must be 0 for PLMS')
-        self.ddim_timesteps = make_ddim_timesteps(ddim_discr_method=ddim_discretize, num_ddim_timesteps=ddim_num_steps,
-                                                  num_ddpm_timesteps=self.ddpm_num_timesteps,verbose=verbose)
+        self.ddim_timesteps = make_ddim_timesteps(ddim_discr_method=ddim_discretize, 
+                                                num_ddim_timesteps=ddim_num_steps,
+                                                num_ddpm_timesteps=self.ddpm_num_timesteps,
+                                                verbose=verbose)
+        
+        # Get all buffers directly from model (already on correct device)
         alphas_cumprod = self.model.alphas_cumprod
         assert alphas_cumprod.shape[0] == self.ddpm_num_timesteps, 'alphas have to be defined for each timestep'
-        to_torch = lambda x: x.clone().detach().to(torch.float32).to(self.model.device)
+        
+        # Use torch operations instead of numpy
+        def to_torch(x):
+            if isinstance(x, torch.Tensor):
+                return x.detach().to(torch.float32).to(self.model.device)
+            return torch.tensor(x, dtype=torch.float32, device=self.model.device)
 
         self.register_buffer('betas', to_torch(self.model.betas))
         self.register_buffer('alphas_cumprod', to_torch(alphas_cumprod))
         self.register_buffer('alphas_cumprod_prev', to_torch(self.model.alphas_cumprod_prev))
 
-        # calculations for diffusion q(x_t | x_{t-1}) and others
-        self.register_buffer('sqrt_alphas_cumprod', to_torch(np.sqrt(alphas_cumprod.cpu())))
-        self.register_buffer('sqrt_one_minus_alphas_cumprod', to_torch(np.sqrt(1. - alphas_cumprod.cpu())))
-        self.register_buffer('log_one_minus_alphas_cumprod', to_torch(np.log(1. - alphas_cumprod.cpu())))
-        self.register_buffer('sqrt_recip_alphas_cumprod', to_torch(np.sqrt(1. / alphas_cumprod.cpu())))
-        self.register_buffer('sqrt_recipm1_alphas_cumprod', to_torch(np.sqrt(1. / alphas_cumprod.cpu() - 1)))
+        # Calculate all buffers using torch operations
+        self.register_buffer('sqrt_alphas_cumprod', torch.sqrt(alphas_cumprod))
+        self.register_buffer('sqrt_one_minus_alphas_cumprod', torch.sqrt(1. - alphas_cumprod))
+        self.register_buffer('log_one_minus_alphas_cumprod', torch.log(1. - alphas_cumprod))
+        self.register_buffer('sqrt_recip_alphas_cumprod', torch.sqrt(1. / alphas_cumprod))
+        self.register_buffer('sqrt_recipm1_alphas_cumprod', torch.sqrt(1. / alphas_cumprod - 1))
 
-        # ddim sampling parameters
-        ddim_sigmas, ddim_alphas, ddim_alphas_prev = make_ddim_sampling_parameters(alphacums=alphas_cumprod.cpu(),
-                                                                                   ddim_timesteps=self.ddim_timesteps,
-                                                                                   eta=ddim_eta,verbose=verbose)
-        self.register_buffer('ddim_sigmas', ddim_sigmas)
-        self.register_buffer('ddim_alphas', ddim_alphas)
-        self.register_buffer('ddim_alphas_prev', ddim_alphas_prev)
-        self.register_buffer('ddim_sqrt_one_minus_alphas', np.sqrt(1. - ddim_alphas))
+        # ddim sampling parameters - modify to use torch operations
+        ddim_sigmas, ddim_alphas, ddim_alphas_prev = make_ddim_sampling_parameters(
+            alphacums=alphas_cumprod,  # No .cpu() call
+            ddim_timesteps=self.ddim_timesteps,
+            eta=ddim_eta,
+            verbose=verbose
+        )
+        
+        self.register_buffer('ddim_sigmas', to_torch(ddim_sigmas))
+        self.register_buffer('ddim_alphas', to_torch(ddim_alphas))
+        self.register_buffer('ddim_alphas_prev', to_torch(ddim_alphas_prev))
+        self.register_buffer('ddim_sqrt_one_minus_alphas', torch.sqrt(1. - to_torch(ddim_alphas)))
+        
         sigmas_for_original_sampling_steps = ddim_eta * torch.sqrt(
-            (1 - self.alphas_cumprod_prev) / (1 - self.alphas_cumprod) * (
-                        1 - self.alphas_cumprod / self.alphas_cumprod_prev))
+            (1 - self.alphas_cumprod_prev) / (1 - self.alphas_cumprod) * 
+            (1 - self.alphas_cumprod / self.alphas_cumprod_prev))
         self.register_buffer('ddim_sigmas_for_original_num_steps', sigmas_for_original_sampling_steps)
 
     @torch.no_grad()
@@ -119,11 +133,11 @@ class PLMSSampler:
 
     @torch.no_grad()
     def plms_sampling(self, cond, shape,
-                      x_T=None, ddim_use_original_steps=False,
-                      callback=None, timesteps=None, quantize_denoised=False,
-                      mask=None, x0=None, img_callback=None, log_every_t=100,
-                      temperature=1., noise_dropout=0., score_corrector=None, corrector_kwargs=None,
-                      unconditional_guidance_scale=1., unconditional_conditioning=None, progbar=True):
+                    x_T=None, ddim_use_original_steps=False,
+                    callback=None, timesteps=None, quantize_denoised=False,
+                    mask=None, x0=None, img_callback=None, log_every_t=100,
+                    temperature=1., noise_dropout=0., score_corrector=None, corrector_kwargs=None,
+                    unconditional_guidance_scale=1., unconditional_conditioning=None, progbar=True):
         device = self.model.betas.device
         b = shape[0]
         if x_T is None:
@@ -137,11 +151,20 @@ class PLMSSampler:
             subset_end = int(min(timesteps / self.ddim_timesteps.shape[0], 1) * self.ddim_timesteps.shape[0]) - 1
             timesteps = self.ddim_timesteps[:subset_end]
 
-        intermediates = {'x_inter': [img], 'pred_x0': [img]}
-        time_range = list(reversed(range(0,timesteps))) if ddim_use_original_steps else np.flip(timesteps)
-        total_steps = timesteps if ddim_use_original_steps else timesteps.shape[0]
+        # Fix for empty/invalid timesteps
+        if isinstance(timesteps, torch.Tensor):
+            if timesteps.numel() == 0:
+                raise ValueError("Timesteps tensor is empty")
+            time_range = torch.flip(timesteps, dims=[0])
+        else:
+            if len(timesteps) == 0:
+                raise ValueError("Timesteps array is empty")
+            time_range = np.flip(timesteps) if not ddim_use_original_steps else list(reversed(range(0, timesteps)))
+
+        total_steps = timesteps if ddim_use_original_steps else len(timesteps)
         print(f"Running PLMS Sampling with {total_steps} timesteps")
 
+        intermediates = {'x_inter': [img], 'pred_x0': [img]}
         iterator = time_range
         if progbar:
             iterator = tqdm(iterator, desc='PLMS Sampler', total=total_steps)
@@ -158,12 +181,12 @@ class PLMSSampler:
                 img = img_orig * mask + (1. - mask) * img
 
             outs = self.p_sample_plms(img, cond, ts, index=index, use_original_steps=ddim_use_original_steps,
-                                      quantize_denoised=quantize_denoised, temperature=temperature,
-                                      noise_dropout=noise_dropout, score_corrector=score_corrector,
-                                      corrector_kwargs=corrector_kwargs,
-                                      unconditional_guidance_scale=unconditional_guidance_scale,
-                                      unconditional_conditioning=unconditional_conditioning,
-                                      old_eps=old_eps, t_next=ts_next)
+                                    quantize_denoised=quantize_denoised, temperature=temperature,
+                                    noise_dropout=noise_dropout, score_corrector=score_corrector,
+                                    corrector_kwargs=corrector_kwargs,
+                                    unconditional_guidance_scale=unconditional_guidance_scale,
+                                    unconditional_conditioning=unconditional_conditioning,
+                                    old_eps=old_eps, t_next=ts_next)
             img, pred_x0, e_t = outs
             old_eps.append(e_t)
             if len(old_eps) >= 4:
